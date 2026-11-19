@@ -92,6 +92,17 @@ The `shell-init` line is what lets `cvenv activate` change your current shell, t
 conda's hook does. Without it, use `eval "$(cvenv activate NAME)"` or
 `source <env>/.cvenv/activate`.
 
+## For AI agents
+
+[`docs/AGENTS.md`](docs/AGENTS.md) is a compact guide for coding agents: the rules (no envs on
+the quota'd filesystem, no `pip install`, always `--env NAME`, heavy builds via `--slurm`), a
+decision table, recipes, guaranteed behaviour and troubleshooting. The binary embeds it, so an
+agent on any machine can read it with `cvenv agent-guide`. To point an agent at it, add a line
+like this to the project's `AGENTS.md`/`CLAUDE.md`:
+
+> Python environments here are managed with cvenv; run `cvenv agent-guide` before creating
+> or using one.
+
 ## Commands
 
 | command | what it does |

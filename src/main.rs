@@ -24,6 +24,8 @@ use std::process::Command;
 use util::{die, expand, human_size, info, is_under, now_iso, remove_tree, stdin_is_tty, stdout_is_tty, warn};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Usage guide for AI agents, compiled into the binary (`cvenv agent-guide`).
+const AGENT_GUIDE: &str = include_str!("../docs/AGENTS.md");
 
 const HELP: &str = "\
 cvenv - pixi environments in single-file Apptainer images
@@ -55,6 +57,7 @@ Working with an env (uses the active env unless --env NAME is given)
 
 Setup
   shell-init              print shell code for ~/.bashrc:  eval \"$(cvenv shell-init)\"
+  agent-guide             print the usage guide for AI agents (rules, recipes, troubleshooting)
 
 Environment variables: CVENV_GPU=auto|1|0|rocm, CVENV_BINDS=a,b:c, CVENV_APPTAINER_ARGS,
 CVENV_NO_STALE_WARNING=1, CVENV_NO_PROMPT=1, CVENV_DEBUG=1, CVENV_STORE, CVENV_CONFIG_DIR.
@@ -176,6 +179,10 @@ fn dispatch(argv: &[String]) -> Result<()> {
     match first {
         None | Some("-h") | Some("--help") | Some("help") => {
             print!("{}", HELP);
+            return Ok(());
+        }
+        Some("agent-guide") => {
+            print!("{}", AGENT_GUIDE);
             return Ok(());
         }
         Some("-V") | Some("--version") | Some("version") => {
