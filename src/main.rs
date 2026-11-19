@@ -39,6 +39,10 @@ Environment management
   wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace]
                           squash an existing installation (e.g. a conda env) into
                           one file, mounted back at its original path
+  register PATH [--name NAME]
+                          add an existing (e.g. shared) env directory to your registry
+  share NAME [--world] [--group GRP]
+                          make an env usable by your group (or everyone)
   envs                    list registered envs and their build status
   info [--env NAME]       details about an env
   move NAME DEST          relocate an env directory
@@ -140,6 +144,23 @@ enum Cmd {
         /// original files (old absolute paths keep working through cvenv)
         #[arg(long)]
         replace: bool,
+    },
+    /// Register an existing env directory (e.g. one shared by a colleague)
+    Register {
+        path: String,
+        /// Name to register it under (default: its own name)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Make an env usable by your group (or everyone)
+    Share {
+        env: String,
+        /// Also make it readable by everyone (o+rX)
+        #[arg(long)]
+        world: bool,
+        /// Change the group of the env's files first (chgrp -R)
+        #[arg(long)]
+        group: Option<String>,
     },
     /// List registered envs
     Envs,
@@ -255,6 +276,8 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Cmd::WrapInstall { name, dir, path, base_image, bin_dir, replace } => {
             wrap::cmd_wrap_install(&name, &dir, path, wrap::InstallOpts { base_image, bin_dirs: bin_dir, replace })
         }
+        Cmd::Register { path, name } => cmd_register(&path, name.as_deref()),
+        Cmd::Share { env, world, group } => cmd_share(&env, world, group.as_deref()),
         Cmd::Envs => cmd_envs(),
         Cmd::Info { env } => cmd_info(env.as_deref()),
         Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, keep_build_dir } => {
@@ -913,5 +936,101 @@ fn require_pixi(e: &Env, verb: &str) -> Result<()> {
             e.manifest.display()
         );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// sharing
+// ---------------------------------------------------------------------------
+
+fn cmd_register(path: &str, name: Option<&str>) -> Result<()> {
+    let mut e = Env::from_dir(&expand(path))?;
+    if let Some(n) = name {
+        if !valid_name(n) {
+            bail!("invalid env name '{}'", n);
+        }
+        e.name = n.to_string();
+    }
+    let reg = load_registry();
+    if let Some(r) = reg.envs.get(&e.name) {
+        bail!("you already have an env named '{}' ({}); pick another with --name", e.name, r.path.display());
+    }
+    let mut rec = e.record();
+    rec.created = Some(now_iso());
+    update_registry(|r| {
+        r.envs.insert(e.name.clone(), rec);
+        Ok(())
+    })?;
+    info(&format!("registered '{}' -> {}", e.name, e.path.display()));
+    if !util::is_writable(&e.art()) {
+        info("the env is read-only for you: you can use it, its owner rebuilds it");
+    }
+    Ok(())
+}
+
+fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let e = resolve_env(Some(sel), false, false)?;
+    let who = if world { "everyone" } else { "your group" };
+    let mut targets = vec![e.path.clone()];
+    if e.is_pixi() && !e.manifest_inside() {
+        targets.push(e.manifest_dir()); // others read the manifest (settings, staleness)
+    }
+    if let Some(ip) = e.meta().and_then(|m| m.install_path) {
+        if ip.join(".cvenv-wrapped").exists() {
+            targets.push(ip); // the stub of a replaced installation
+        }
+    }
+    let mode = if world { "g+rX,o+rX" } else { "g+rX" };
+    for t in &targets {
+        if let Some(g) = group {
+            if !Command::new("chgrp").arg("-R").arg(g).arg(t).status()?.success() {
+                bail!("chgrp -R {} {} failed", g, t.display());
+            }
+        }
+        if !Command::new("chmod").arg("-R").arg(mode).arg(t).status()?.success() {
+            bail!("chmod -R {} {} failed", mode, t.display());
+        }
+        info(&format!("{} can now read {}", who, t.display()));
+    }
+    // every parent directory needs the x bit for others to reach the env
+    let bit = if world { 0o001 } else { 0o010 };
+    let mut blocked = vec![];
+    let mut check = |p: &Path| {
+        let mut cur = p.parent();
+        while let Some(d) = cur {
+            if d == Path::new("/") {
+                break;
+            }
+            if let Ok(m) = fs::metadata(d) {
+                if m.permissions().mode() & bit == 0 && !blocked.contains(&d.to_path_buf()) {
+                    blocked.push(d.to_path_buf());
+                }
+            }
+            cur = d.parent();
+        }
+    };
+    for t in &targets {
+        check(t);
+    }
+    // the shims run this cvenv binary, so it must be reachable too
+    let exe = config::exe_path();
+    check(&exe);
+    let exe_ok = fs::metadata(&exe).map(|m| m.permissions().mode() & (bit * 5) == bit * 5).unwrap_or(false);
+    if !blocked.is_empty() {
+        warn(&format!("{} cannot enter these parent directories (missing x permission):", who));
+        for b in &blocked {
+            eprintln!("        {}", b.display());
+        }
+        eprintln!("    fix (if appropriate): chmod {}+x {}", if world { "o" } else { "g" }, blocked.iter().map(|b| util::qp(b)).collect::<Vec<_>>().join(" "));
+    }
+    if !exe_ok {
+        warn(&format!("{} cannot run the cvenv binary {} that the shims use", who, exe.display()));
+    }
+    println!(
+        "Others can now use it with:\n    cvenv register {p}              # once, then `cvenv activate {n}`\n    cvenv run --env {p} CMD\n    {p}/.cvenv/bin/python ...        # the shims work directly",
+        p = e.path.display(),
+        n = e.name
+    );
     Ok(())
 }

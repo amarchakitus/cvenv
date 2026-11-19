@@ -264,6 +264,12 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+pub fn is_writable(p: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    CString::new(p.as_os_str().as_bytes()).map(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }).unwrap_or(false)
+}
+
 pub fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
