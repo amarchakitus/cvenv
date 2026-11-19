@@ -302,7 +302,7 @@ pub fn write_activate_script(env: &Env) -> Result<()> {
         name = env.name,
         path = p.display(),
         exe = qp(&exe_path()),
-        qname = q(&env.name)
+        qname = qp(&env.path)
     );
     write_atomic(&p, body.as_bytes(), Some(0o644))
 }
@@ -387,6 +387,7 @@ pub fn activation_code(env: &Env) -> String {
         RESTORE_PS1.to_string(),
         format!("export PATH={}", q(&new_path)),
         format!("export CVENV_ACTIVE={}", q(&env.name)),
+        format!("export CVENV_ACTIVE_DIR={}", qp(&env.path)),
         format!("export CVENV_SHIM_DIR={}", qp(&env.shim_dir())),
         format!("export CVENV_MANIFEST={}", qp(&env.manifest)),
     ];
@@ -406,7 +407,7 @@ pub fn deactivation_code() -> String {
     [
         RESTORE_PS1.to_string(),
         format!("export PATH={}", q(&path)),
-        "unset CVENV_ACTIVE CVENV_SHIM_DIR CVENV_MANIFEST".into(),
+        "unset CVENV_ACTIVE CVENV_ACTIVE_DIR CVENV_SHIM_DIR CVENV_MANIFEST".into(),
         "hash -r 2>/dev/null || true".into(),
     ]
     .join("\n")

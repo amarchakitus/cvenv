@@ -242,12 +242,7 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     }
 
     let image_size = fs::metadata(env.image())?.len();
-    let fresh = Env::new(&env.name, &crate::env::Record {
-        path: env.path.clone(),
-        manifest: env.manifest.clone(),
-        pixi_env: env.pixi_env.clone(),
-        created: None,
-    }); // re-read the manifest: the build may have touched it
+    let fresh = Env::new(&env.name, &env.record()); // re-read the manifest: the build may have touched it
     let meta = Meta {
         name: env.name.clone(),
         pixi_env: env.pixi_env.clone(),
@@ -262,8 +257,10 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
         fingerprint: compute_fingerprint(&fresh)?,
         stat: stat_sig(&fresh),
         bins: bins.clone(),
+        ..Default::default()
     };
     write_json(&env.meta_path(), &meta)?;
+    env.write_env_file()?;
     let n = write_shims(env, &bins)?;
     if !keep_build_dir {
         remove_tree(&work);

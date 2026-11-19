@@ -15,6 +15,11 @@ pub const ART_DIR: &str = ".cvenv";
 pub const IMAGE_NAME: &str = "image.sif";
 pub const META_NAME: &str = "image.json";
 pub const SHIM_LINK: &str = ".cvenv-shim";
+/// Per-env descriptor next to the image, so an env can be used from its directory
+/// alone (shared envs, other users, no registry entry).
+pub const ENV_FILE: &str = "env.json";
+/// Settings file of wrapped envs (they have no pixi manifest).
+pub const WRAP_CFG: &str = "cvenv.toml";
 
 /// Workspace metadata that does not influence what gets installed.
 const NON_DEP_WORKSPACE_KEYS: &[&str] = &[
@@ -28,10 +33,40 @@ fn default_pixi_env() -> String {
     "default".into()
 }
 
+fn is_pixi(k: &Kind) -> bool {
+    *k == Kind::Pixi
+}
+
+/// What an env is built from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    /// a pixi workspace installed into an image by `cvenv rebuild`
+    #[default]
+    Pixi,
+    /// an existing container image (`cvenv wrap`)
+    Wrap,
+    /// an existing on-disk installation squashed into an image (`cvenv wrap-install`)
+    WrapInstall,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Pixi => "pixi",
+            Kind::Wrap => "wrap",
+            Kind::WrapInstall => "wrap-install",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Record {
     pub path: PathBuf,
+    /// pixi manifest (pixi envs) or `<env>/cvenv.toml` (wrapped envs)
     pub manifest: PathBuf,
+    #[serde(default, skip_serializing_if = "is_pixi")]
+    pub kind: Kind,
     #[serde(default = "default_pixi_env")]
     pub pixi_env: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +108,9 @@ pub struct StatSig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 pub struct Meta {
+    pub kind: Kind,
     pub name: String,
     pub pixi_env: String,
     pub manifest: PathBuf,
@@ -89,11 +126,26 @@ pub struct Meta {
     pub bins: Vec<String>,
 }
 
+/// `<env>/.cvenv/env.json`
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EnvFile {
+    pub name: String,
+    #[serde(default)]
+    pub kind: Kind,
+    /// relative to the env directory when inside it
+    pub manifest: PathBuf,
+    #[serde(default = "default_pixi_env")]
+    pub pixi_env: String,
+}
+
 pub struct Env {
     pub name: String,
     pub path: PathBuf,
     pub manifest: PathBuf,
     pub pixi_env: String,
+    pub kind: Kind,
+    /// found via its directory (env.json), not this user's registry
+    pub unregistered: bool,
     data: OnceCell<toml::Table>,
 }
 
@@ -104,7 +156,53 @@ impl Env {
             path: rec.path.clone(),
             manifest: rec.manifest.clone(),
             pixi_env: rec.pixi_env.clone(),
+            kind: rec.kind,
+            unregistered: false,
             data: OnceCell::new(),
+        }
+    }
+
+    /// Load an env from its directory via `.cvenv/env.json` (no registry needed).
+    pub fn from_dir(dir: &Path) -> Result<Env> {
+        let dir = realpath(dir);
+        let f = dir.join(ART_DIR).join(ENV_FILE);
+        let ef: EnvFile = read_json(&f).ok_or_else(|| {
+            anyhow!("{} is not a cvenv env (no readable {})", dir.display(), f.display())
+        })?;
+        let manifest = if ef.manifest.is_absolute() { ef.manifest.clone() } else { dir.join(&ef.manifest) };
+        let rec = Record { path: dir, manifest, kind: ef.kind, pixi_env: ef.pixi_env, created: None };
+        let mut e = Env::new(&ef.name, &rec);
+        e.unregistered = load_registry().envs.get(&ef.name).map(|r| realpath(&r.path) != rec.path).unwrap_or(true);
+        Ok(e)
+    }
+
+    pub fn record(&self) -> Record {
+        Record {
+            path: self.path.clone(),
+            manifest: self.manifest.clone(),
+            kind: self.kind,
+            pixi_env: self.pixi_env.clone(),
+            created: None,
+        }
+    }
+
+    /// Write `.cvenv/env.json` (best effort: shared envs may not be writable by us).
+    pub fn write_env_file(&self) -> Result<()> {
+        let manifest = self.manifest.strip_prefix(&self.path).map(Path::to_path_buf).unwrap_or_else(|_| self.manifest.clone());
+        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone() };
+        write_json(&self.art().join(ENV_FILE), &ef)
+    }
+
+    pub fn is_pixi(&self) -> bool {
+        self.kind == Kind::Pixi
+    }
+
+    /// The `--env` value that selects this env for the current user.
+    pub fn selector(&self) -> String {
+        if self.unregistered {
+            self.path.display().to_string()
+        } else {
+            self.name.clone()
         }
     }
 
@@ -146,13 +244,18 @@ impl Env {
         if self.is_active() {
             "cvenv rebuild".into()
         } else {
-            format!("cvenv rebuild --env {}", self.name)
+            format!("cvenv rebuild --env {}", self.selector())
         }
     }
 
     pub fn data(&self) -> Result<&toml::Table> {
         if let Some(d) = self.data.get() {
             return Ok(d);
+        }
+        if !self.is_pixi() && !self.manifest.is_file() {
+            // wrapped envs: the settings file is optional
+            let _ = self.data.set(toml::Table::new());
+            return Ok(self.data.get().unwrap());
         }
         let text = fs::read_to_string(&self.manifest)
             .with_context(|| format!("manifest of env '{}' not found: {}", self.name, self.manifest.display()))?;
@@ -162,8 +265,11 @@ impl Env {
         Ok(self.data.get().unwrap())
     }
 
-    /// The `[tool.cvenv]` table.
+    /// The `[tool.cvenv]` table (pixi envs) or the whole `cvenv.toml` (wrapped envs).
     pub fn cfg(&self) -> toml::Table {
+        if !self.is_pixi() {
+            return self.data().cloned().unwrap_or_default();
+        }
         self.data()
             .ok()
             .and_then(|d| d.get("tool"))
@@ -215,6 +321,10 @@ pub fn valid_name(n: &str) -> bool {
 pub fn resolve_env(name: Option<&str>, allow_active: bool, allow_cwd: bool) -> Result<Env> {
     let reg = load_registry();
     if let Some(n) = name {
+        // a path selects an env by its directory (works for envs shared by other users)
+        if n.contains('/') || n == "." || n == ".." {
+            return Env::from_dir(&crate::util::expand(n));
+        }
         return match reg.envs.get(n) {
             Some(rec) => Ok(Env::new(n, rec)),
             None => {
@@ -230,6 +340,13 @@ pub fn resolve_env(name: Option<&str>, allow_active: bool, allow_cwd: bool) -> R
     if allow_active {
         if let Ok(n) = std::env::var("CVENV_ACTIVE") {
             if !n.is_empty() {
+                if let Ok(dir) = std::env::var("CVENV_ACTIVE_DIR") {
+                    if let Ok(e) = Env::from_dir(Path::new(&dir)) {
+                        if e.name == n {
+                            return Ok(e);
+                        }
+                    }
+                }
                 if let Some(rec) = reg.envs.get(&n) {
                     return Ok(Env::new(&n, rec));
                 }
@@ -244,7 +361,7 @@ pub fn resolve_env(name: Option<&str>, allow_active: bool, allow_cwd: bool) -> R
             }
         }
     }
-    bail!("no env selected: activate one (`cvenv activate NAME`), pass --env NAME, or run from inside an env directory")
+    bail!("no env selected: activate one (`cvenv activate NAME`), pass --env NAME (or --env /path/to/env), or run from inside an env directory")
 }
 
 pub fn env_for_dir(d: &Path, reg: &Registry) -> Option<Env> {
@@ -265,17 +382,18 @@ pub fn env_for_dir(d: &Path, reg: &Registry) -> Option<Env> {
     best.map(|(n, _)| Env::new(n, &reg.envs[n]))
 }
 
-/// Find the shim directory's env: `<env>/.cvenv/bin` -> registry entry with that path.
+/// Find the env owning a shim directory (`<env>/.cvenv/bin`, possibly reached through
+/// symlinks): this user's registry first, then the env's own `env.json`.
 pub fn env_for_shim_dir(shim_dir: &Path) -> Option<Env> {
-    let env_dir = shim_dir.parent()?.parent()?;
-    let target = realpath(env_dir);
+    let real = realpath(shim_dir);
+    let env_dir = real.parent()?.parent()?.to_path_buf();
     let reg = load_registry();
     for (n, rec) in &reg.envs {
-        if realpath(&rec.path) == target {
+        if realpath(&rec.path) == env_dir {
             return Some(Env::new(n, rec));
         }
     }
-    None
+    Env::from_dir(&env_dir).ok()
 }
 
 pub fn find_manifest(p: &Path) -> Option<PathBuf> {
@@ -391,6 +509,9 @@ pub fn staleness(env: &Env) -> Staleness {
     if !env.built() {
         s.not_built = true;
         s.reasons.push(format!("env '{}' has not been built yet - run `{}`", env.name, env.rebuild_hint()));
+        return s;
+    }
+    if !env.is_pixi() {
         return s;
     }
     let mut meta = match env.meta() {

@@ -16,7 +16,7 @@ mod util;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Env, Record, SHIM_LINK};
+use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Env, Kind, Record, SHIM_LINK};
 use runtime::{exec_in_container, find_pixi, gpu_flags, IMG_PIXI};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ Environment management
   config [list|get|set|unset] [KEY] [VALUE]
                           settings (store, apptainer, pixi, build-tmpdir, ...)
 
-Working with an env (uses the active env unless --env NAME is given)
+Working with an env (uses the active env unless --env NAME|PATH is given)
   activate [NAME]         put the env's commands on PATH in this shell
   deactivate              undo activate
   add [pixi add args]     add dependencies to the manifest (no build)
@@ -346,6 +346,7 @@ fn cmd_init(
     let rec = Record {
         path: path.clone(),
         manifest: manifest.clone(),
+        kind: Kind::Pixi,
         pixi_env: pixi_env.clone().unwrap_or_else(|| "default".into()),
         created: Some(now_iso()),
     };
@@ -361,6 +362,7 @@ fn cmd_init(
     })?;
     runtime::write_shim_link(&env)?;
     runtime::write_activate_script(&env)?;
+    env.write_env_file()?;
 
     if created && !packages.is_empty() {
         let ok = Command::new(find_pixi()?)
@@ -423,7 +425,8 @@ fn cmd_envs() -> Result<()> {
 fn cmd_info(name: Option<&str>) -> Result<()> {
     let e = resolve_env(name, true, true)?;
     let meta = e.meta();
-    println!("env         : {}{}", e.name, if e.is_active() { "  (active)" } else { "" });
+    println!("env         : {}{}{}", e.name, if e.is_active() { "  (active)" } else { "" }, if e.unregistered { "  (not in your registry)" } else { "" });
+    println!("kind        : {}", e.kind.label());
     println!("path        : {}", e.path.display());
     println!("manifest    : {}", e.manifest.display());
     println!("pixi env    : {}", e.pixi_env);
@@ -454,14 +457,17 @@ fn cmd_activate(name: Option<&str>) -> Result<()> {
             &format!(
                 "`cvenv activate` must change your current shell. Either add\n    eval \"$(cvenv shell-init)\"\n\
                  to ~/.bashrc (then `cvenv activate {n}` just works), or run\n    eval \"$(cvenv activate {n})\"   or   source {a}/activate",
-                n = e.name,
+                n = e.selector(),
                 a = e.art().display()
             ),
             2,
         );
     }
-    runtime::write_shim_link(&e)?;
-    runtime::write_activate_script(&e)?;
+    if !e.unregistered {
+        // keep the shim link pointing at this cvenv binary (best effort)
+        let _ = runtime::write_shim_link(&e);
+        let _ = runtime::write_activate_script(&e);
+    }
     print!("{}", runtime::activation_code(&e));
     if e.built() {
         info(&format!("activated '{}'", e.name));
@@ -516,6 +522,7 @@ fn cmd_move(name: &str, dest_arg: &str) -> Result<()> {
     let moved = Env::new(name, new_rec.as_ref().unwrap());
     runtime::write_shim_link(&moved)?;
     runtime::write_activate_script(&moved)?;
+    moved.write_env_file()?;
     info(&format!("moved '{}' to {}", name, dest.display()));
     if e.manifest_inside() && moved.built() {
         info(&format!(
