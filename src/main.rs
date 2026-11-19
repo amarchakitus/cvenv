@@ -728,6 +728,9 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
         bail!("usage: cvenv run [--env NAME] COMMAND [ARGS...]   (COMMAND may be a pixi task)");
     }
     let e = resolve_env(name.as_deref(), true, true)?;
+    if !e.built() {
+        bail!("env '{}' has not been built yet - run `{}`", e.name, e.rebuild_hint());
+    }
     warn_if_stale(&e);
     if !exec_mode && env::task_names(&e).contains(&rest[0]) {
         let mut argv = vec![
@@ -758,6 +761,9 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
 fn cmd_shell(argv: &[String]) -> Result<()> {
     let (name, rest) = split_env_opt(argv, true)?;
     let e = resolve_env(name.as_deref(), true, true)?;
+    if !e.built() {
+        bail!("env '{}' has not been built yet - run `{}`", e.name, e.rebuild_hint());
+    }
     warn_if_stale(&e);
     exec_in_container(&e, &rest, "shell")
 }
