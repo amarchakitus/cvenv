@@ -1,7 +1,7 @@
 //! Running commands inside an env's image: tool discovery, binds, GPUs, shims, activation.
 
 use crate::config::{self, exe_path};
-use crate::env::{Env, SHIM_LINK};
+use crate::env::{Env, Kind, SHIM_LINK};
 use crate::util::{expand, is_executable, is_under, q, qp, realpath, warn, which, write_atomic};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -14,6 +14,12 @@ use std::process::Command;
 pub const IMG_ROOT: &str = "/opt/cvenv";
 pub const IMG_PIXI: &str = "/opt/cvenv/bin/pixi";
 pub const IMG_ENVS: &str = "/opt/cvenv/envs";
+/// `<env>/.cvenv/inner-bin`: symlinks to the real executables inside the image. Bound over
+/// the shim directory inside the container, so `<env>/.cvenv/bin/python` is the shim on the
+/// host and the real interpreter in the container - `sys.executable` is valid on both sides.
+pub const LAYER_DIR: &str = "inner-bin";
+/// `<env>/.cvenv/install.sqfs`: the squashed tree of a wrap-install env.
+pub const INSTALL_SQFS: &str = "install.sqfs";
 
 /// Host variables removed before entering the container: they would point the
 /// containerised interpreter at host installations.
@@ -212,6 +218,33 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
             None => src.to_string_lossy().to_string(),
         });
     }
+    // host-valid paths / wrapped installation mounts
+    let meta = env.meta().unwrap_or_default();
+    let mut prepend: Vec<String> = vec![];
+    let mut cmd_path: Option<String> = None;
+    let first = args.first().filter(|a| !a.contains('/')).cloned();
+    if env.kind == Kind::WrapInstall {
+        if let Some(ip) = &meta.install_path {
+            binds.push(format!("{}:{}:image-src=/", env.art().join(INSTALL_SQFS).display(), ip.display()));
+            prepend.extend(meta.bin_dirs.iter().map(|d| ip.join(d).display().to_string()));
+            if meta.conda {
+                argv.push("--env".into());
+                argv.push(format!("CONDA_PREFIX={}", ip.display()));
+            }
+            cmd_path = first.as_ref().and_then(|f| meta.exec_paths.get(f).cloned());
+        }
+    } else {
+        let layer = env.art().join(LAYER_DIR);
+        let enabled = cfg.get("host-valid-paths").and_then(|v| v.as_bool()).unwrap_or(true);
+        if enabled && layer.is_dir() && !meta.exec_paths.is_empty() {
+            binds.push(format!("{}:{}", layer.display(), env.shim_dir().display()));
+            prepend.push(env.shim_dir().display().to_string());
+            cmd_path = first
+                .as_ref()
+                .filter(|f| meta.exec_paths.contains_key(*f))
+                .map(|f| env.shim_dir().join(f).display().to_string());
+        }
+    }
     for b in binds {
         argv.push("--bind".into());
         argv.push(b);
@@ -231,7 +264,27 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
         argv.push(format!("PS1=({}) [container] \\w \\$ ", env.name));
     }
     argv.push(env.image().to_string_lossy().to_string());
-    argv.extend(args.iter().cloned());
+    let mut args: Vec<String> = args.to_vec();
+    if let (Some(p), false) = (&cmd_path, args.is_empty()) {
+        args[0] = p.clone(); // run via the host-valid path so sys.executable etc. are valid on the host
+    }
+    if env.kind == Kind::WrapInstall && meta.conda && !args.is_empty() {
+        if let Some(ip) = &meta.install_path {
+            // conda envs: run the packages' activate.d scripts like `conda activate` would
+            let mut wrapped = vec![
+                "/bin/bash".to_string(),
+                "-c".into(),
+                format!(
+                    "for f in {}/etc/conda/activate.d/*.sh; do [ -f \"$f\" ] && . \"$f\"; done; exec \"$@\"",
+                    q(&ip.display().to_string())
+                ),
+                "cvenv-activate".into(),
+            ];
+            wrapped.extend(args);
+            args = wrapped;
+        }
+    }
+    argv.extend(args);
 
     let mut penv: BTreeMap<String, String> = std::env::vars().collect();
     for k in HOST_ENV_DROP {
@@ -246,6 +299,12 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     }
     // pip can't write to the read-only image; never let it fall back to ~/.local
     penv.entry("PIP_USER".into()).or_insert_with(|| "0".into());
+    if !prepend.is_empty() {
+        if let Some(user) = penv.get("APPTAINERENV_PREPEND_PATH").filter(|v| !v.is_empty()) {
+            prepend.push(user.clone());
+        }
+        penv.insert("APPTAINERENV_PREPEND_PATH".into(), prepend.join(":"));
+    }
     Ok(ContainerCmd { argv, env: penv })
 }
 
@@ -305,6 +364,22 @@ pub fn write_activate_script(env: &Env) -> Result<()> {
         qname = qp(&env.path)
     );
     write_atomic(&p, body.as_bytes(), Some(0o644))
+}
+
+/// (Re)create the host-valid path layer: `<art>/inner-bin/NAME -> <path inside the image>`.
+pub fn write_layer(env: &Env, exec_paths: &BTreeMap<String, String>) -> Result<()> {
+    let d = env.art().join(LAYER_DIR);
+    let tmp = env.art().join(format!(".{}.tmp", LAYER_DIR));
+    crate::util::remove_tree(&tmp);
+    fs::create_dir_all(&tmp)?;
+    for (name, target) in exec_paths {
+        if !name.is_empty() && !name.starts_with('.') && !name.contains('/') {
+            std::os::unix::fs::symlink(target, tmp.join(name))?;
+        }
+    }
+    crate::util::remove_tree(&d);
+    fs::rename(&tmp, &d)?;
+    Ok(())
 }
 
 /// Recreate the shim symlinks for `bins`; returns how many were created.

@@ -1,7 +1,7 @@
 //! Building an env's image: definition file generation + `apptainer build`.
 
 use crate::config;
-use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Meta};
+use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Kind, Meta};
 use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
 use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, username, warn, write_json};
 use anyhow::{bail, Context, Result};
@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 /// (Bootstrap, From) for an image reference.
-fn parse_base_image(r: &str) -> (String, String) {
+pub fn parse_base_image(r: &str) -> (String, String) {
     for kind in ["docker-daemon", "docker", "oras", "library", "shub", "localimage"] {
         if let Some(rest) = r.strip_prefix(&format!("{}://", kind)) {
             return (kind.to_string(), rest.to_string());
@@ -130,6 +130,14 @@ fn default_base_image(pixi_host: &Path) -> String {
 }
 
 pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool) -> Result<()> {
+    match env.kind {
+        Kind::Wrap => return crate::wrap::refresh_wrap(env),
+        Kind::WrapInstall => return crate::wrap::refresh_install(env),
+        Kind::Pixi => {}
+    }
+    if env.unregistered {
+        bail!("env '{}' belongs to another user (or isn't registered); only its owner can rebuild it", env.name);
+    }
     let app = find_apptainer()?;
     let pixi_host = find_pixi()?;
     if !env.manifest.is_file() {
@@ -244,6 +252,7 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     let image_size = fs::metadata(env.image())?.len();
     let fresh = Env::new(&env.name, &env.record()); // re-read the manifest: the build may have touched it
     let meta = Meta {
+        kind: Kind::Pixi,
         name: env.name.clone(),
         pixi_env: env.pixi_env.clone(),
         manifest: env.manifest.clone(),

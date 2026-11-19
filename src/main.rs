@@ -13,6 +13,7 @@ mod config;
 mod env;
 mod runtime;
 mod util;
+mod wrap;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -33,6 +34,11 @@ cvenv - pixi environments in single-file Apptainer images
 Environment management
   init NAME [--path DIR] [--manifest FILE] [-c CH] [--cuda VER] [PKG...]
                           create (or adopt) a pixi workspace and register it
+  wrap NAME IMAGE [--link] [--bin-dir DIR] [--command CMD]
+                          use an existing container (file.sif, docker://, oras://...)
+  wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace]
+                          squash an existing installation (e.g. a conda env) into
+                          one file, mounted back at its original path
   envs                    list registered envs and their build status
   info [--env NAME]       details about an env
   move NAME DEST          relocate an env directory
@@ -95,6 +101,45 @@ enum Cmd {
         cuda: Option<String>,
         /// Packages to add to a new manifest
         packages: Vec<String>,
+    },
+    /// Use an existing container image (local .sif, docker://, oras://, ...)
+    Wrap {
+        name: String,
+        /// Image file or reference (docker://nvcr.io/nvidia/pytorch:24.10-py3, ./my.sif, ...)
+        image: String,
+        /// Env directory (default: <store>/NAME)
+        #[arg(long)]
+        path: Option<String>,
+        /// Symlink a local .sif instead of copying it
+        #[arg(long)]
+        link: bool,
+        /// Container directory whose executables are exposed (repeatable; default: the
+        /// container's PATH, interpreters/launchers only from /usr/bin and /bin)
+        #[arg(long = "bin-dir")]
+        bin_dir: Vec<String>,
+        /// Extra command to expose (repeatable)
+        #[arg(long = "command")]
+        command: Vec<String>,
+    },
+    /// Squash an existing installation into an image, mounted back at its original path
+    WrapInstall {
+        name: String,
+        /// The installation directory (e.g. an existing conda env)
+        dir: String,
+        /// Env directory (default: <store>/NAME)
+        #[arg(long)]
+        path: Option<String>,
+        /// Container providing the OS around the installation (default: the pixi image;
+        /// use e.g. docker://rockylinux:8 for software built against the host OS)
+        #[arg(long)]
+        base_image: Option<String>,
+        /// Directory inside DIR whose executables are exposed (repeatable; default: bin)
+        #[arg(long = "bin-dir")]
+        bin_dir: Vec<String>,
+        /// Move the original tree aside and leave a stub at DIR, so you can delete the
+        /// original files (old absolute paths keep working through cvenv)
+        #[arg(long)]
+        replace: bool,
     },
     /// List registered envs
     Envs,
@@ -203,6 +248,12 @@ fn dispatch(argv: &[String]) -> Result<()> {
     match cli.cmd {
         Cmd::Init { name, path, manifest, pixi_env, channel, platform, cuda, packages } => {
             cmd_init(&name, path, manifest, pixi_env, channel, platform, cuda, packages)
+        }
+        Cmd::Wrap { name, image, path, link, bin_dir, command } => {
+            wrap::cmd_wrap(&name, &image, path, wrap::WrapOpts { link, bin_dirs: bin_dir, commands: command })
+        }
+        Cmd::WrapInstall { name, dir, path, base_image, bin_dir, replace } => {
+            wrap::cmd_wrap_install(&name, &dir, path, wrap::InstallOpts { base_image, bin_dirs: bin_dir, replace })
         }
         Cmd::Envs => cmd_envs(),
         Cmd::Info { env } => cmd_info(env.as_deref()),
@@ -402,7 +453,7 @@ fn cmd_envs() -> Result<()> {
             format!("{} (job {})", if state == "PENDING" { "queued" } else { "building" }, job)
         } else if build::is_building(&e) {
             "building".to_string()
-        } else if !e.manifest.is_file() {
+        } else if e.is_pixi() && !e.manifest.is_file() {
             "manifest missing".to_string()
         } else if !e.built() {
             "not built".to_string()
@@ -411,13 +462,18 @@ fn cmd_envs() -> Result<()> {
             if s.changed { "stale" } else if s.moved { "moved" } else { "ok" }.to_string()
         };
         let size = if e.built() { human_size(fs::metadata(e.image())?.len()) } else { "-".into() };
-        rows.push((if *n == active { "*" } else { " " }, n.clone(), status, size, e.path.display().to_string()));
+        let size = if e.kind == Kind::WrapInstall {
+            e.meta().map(|m| human_size(m.image_size)).unwrap_or(size)
+        } else {
+            size
+        };
+        rows.push((if *n == active { "*" } else { " " }, n.clone(), e.kind.label(), status, size, e.path.display().to_string()));
     }
     let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max(4);
-    let w2 = rows.iter().map(|r| r.2.len()).max().unwrap_or(6).max(6);
-    println!("  {:<w1$}  {:<w2$}  {:>7}  PATH", "NAME", "STATUS", "SIZE", w1 = w1, w2 = w2);
+    let w3 = rows.iter().map(|r| r.3.len()).max().unwrap_or(6).max(6);
+    println!("  {:<w1$}  {:<12}  {:<w3$}  {:>7}  PATH", "NAME", "KIND", "STATUS", "SIZE", w1 = w1, w3 = w3);
     for r in rows {
-        println!("{} {:<w1$}  {:<w2$}  {:>7}  {}", r.0, r.1, r.2, r.3, r.4, w1 = w1, w2 = w2);
+        println!("{} {:<w1$}  {:<12}  {:<w3$}  {:>7}  {}", r.0, r.1, r.2, r.3, r.4, r.5, w1 = w1, w3 = w3);
     }
     Ok(())
 }
@@ -428,8 +484,20 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
     println!("env         : {}{}{}", e.name, if e.is_active() { "  (active)" } else { "" }, if e.unregistered { "  (not in your registry)" } else { "" });
     println!("kind        : {}", e.kind.label());
     println!("path        : {}", e.path.display());
-    println!("manifest    : {}", e.manifest.display());
-    println!("pixi env    : {}", e.pixi_env);
+    if e.is_pixi() {
+        println!("manifest    : {}", e.manifest.display());
+        println!("pixi env    : {}", e.pixi_env);
+    } else {
+        println!("settings    : {}", e.manifest.display());
+        if let Some(m) = &meta {
+            if let Some(src) = &m.source {
+                println!("source      : {}{}", src, if m.link { "  (linked)" } else { "" });
+            }
+            if let Some(ip) = &m.install_path {
+                println!("mounted at  : {}{}", ip.display(), if m.conda { "  (conda env)" } else { "" });
+            }
+        }
+    }
     println!("image       : {}{}", e.image().display(), if e.built() { "" } else { "  (not built)" });
     if e.built() {
         println!("image size  : {}", human_size(fs::metadata(e.image())?.len()));
@@ -523,8 +591,11 @@ fn cmd_move(name: &str, dest_arg: &str) -> Result<()> {
     runtime::write_shim_link(&moved)?;
     runtime::write_activate_script(&moved)?;
     moved.write_env_file()?;
+    if moved.kind == Kind::WrapInstall {
+        wrap::relink_stub(&moved);
+    }
     info(&format!("moved '{}' to {}", name, dest.display()));
-    if e.manifest_inside() && moved.built() {
+    if e.is_pixi() && e.manifest_inside() && moved.built() {
         info(&format!(
             "the image keeps working as-is; run `cvenv rebuild --env {}` if you use pixi tasks or editable/path dependencies",
             name
@@ -552,6 +623,7 @@ fn move_dir(src: &Path, dst: &Path) -> Result<()> {
 
 fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
     let e = resolve_env(Some(name), false, false)?;
+    let install_path = e.meta().and_then(|m| m.install_path);
     if delete {
         let targets: Vec<PathBuf> = if e.manifest_inside() { vec![e.path.clone()] } else { vec![e.art()] };
         if !yes {
@@ -581,6 +653,11 @@ fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
         Ok(())
     })?;
     info(&format!("unregistered '{}'", name));
+    if delete && e.kind == Kind::WrapInstall {
+        if let Some(ip) = &install_path {
+            warn(&format!("if {} was replaced by a stub, it no longer works: restore it from {}.cvenv-orig-*", ip.display(), ip.display()));
+        }
+    }
     if e.is_active() {
         info("it is still active in this shell; run `cvenv deactivate`");
     }
@@ -691,6 +768,7 @@ fn cmd_add_remove(verb: &str, argv: &[String]) -> Result<()> {
         return Ok(());
     }
     let e = resolve_env(name.as_deref(), true, true)?;
+    require_pixi(&e, verb)?;
     let mut args = vec![verb.to_string(), "--manifest-path".into(), e.manifest.display().to_string(), "--frozen".into()];
     args.extend(rest);
     if !host_pixi(&args)? {
@@ -707,6 +785,7 @@ fn cmd_add_remove(verb: &str, argv: &[String]) -> Result<()> {
 fn cmd_task(argv: &[String]) -> Result<()> {
     let (name, mut rest) = split_env_opt(argv, false)?;
     let e = resolve_env(name.as_deref(), true, true)?;
+    require_pixi(&e, "task")?;
     if rest.is_empty() {
         rest.push("list".into());
     }
@@ -721,6 +800,18 @@ fn cmd_task(argv: &[String]) -> Result<()> {
 fn cmd_list(argv: &[String]) -> Result<()> {
     let (name, rest) = split_env_opt(argv, false)?;
     let e = resolve_env(name.as_deref(), true, true)?;
+    if !e.is_pixi() {
+        // wrapped envs: list the exposed commands
+        let meta = e.meta().ok_or_else(|| anyhow::anyhow!("env '{}' has no metadata", e.name))?;
+        let pats: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+        println!("Commands exposed by {} env '{}':", e.kind.label(), e.name);
+        for (n, p) in &meta.exec_paths {
+            if pats.is_empty() || pats.iter().any(|x| n.contains(x.as_str())) {
+                println!("  {:<24} {}", n, p);
+            }
+        }
+        return Ok(());
+    }
     let p = e.art().join("packages.txt");
     let text = fs::read_to_string(&p).map_err(|_| anyhow::anyhow!("env '{}' has not been built yet", e.name))?;
     let pats: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
@@ -746,7 +837,7 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
         bail!("env '{}' has not been built yet - run `{}`", e.name, e.rebuild_hint());
     }
     warn_if_stale(&e);
-    if !exec_mode && env::task_names(&e).contains(&rest[0]) {
+    if !exec_mode && e.is_pixi() && env::task_names(&e).contains(&rest[0]) {
         let mut argv = vec![
             IMG_PIXI.to_string(),
             "run".into(),
@@ -809,4 +900,18 @@ mod tests {
         assert!(is_pip("pip") && is_pip("pip3") && is_pip("pip3.12"));
         assert!(!is_pip("pipx") && !is_pip("pip3.x"));
     }
+}
+
+fn require_pixi(e: &Env, verb: &str) -> Result<()> {
+    if !e.is_pixi() {
+        bail!(
+            "`cvenv {}` needs a pixi env, but '{}' is a {} env (it has no pixi manifest). \
+             Settings for wrapped envs live in {}",
+            verb,
+            e.name,
+            e.kind.label(),
+            e.manifest.display()
+        );
+    }
+    Ok(())
 }

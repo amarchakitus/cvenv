@@ -124,6 +124,20 @@ pub struct Meta {
     pub fingerprint: Fingerprint,
     pub stat: StatSig,
     pub bins: Vec<String>,
+    /// command name -> absolute path inside the container (host-valid path layer)
+    pub exec_paths: BTreeMap<String, String>,
+    /// wrap: the image reference it came from; wrap-install: the wrapped directory
+    pub source: Option<String>,
+    /// wrap-install: where the squashed tree is mounted (= its original path)
+    pub install_path: Option<PathBuf>,
+    /// wrap-install: directories (relative to install_path) whose executables are exposed
+    pub bin_dirs: Vec<String>,
+    /// wrap-install: the tree is a conda env (CONDA_PREFIX + activate.d scripts)
+    pub conda: bool,
+    /// wrap: extra command names to expose
+    pub commands: Vec<String>,
+    /// wrap: image.sif is a symlink to the source image
+    pub link: bool,
 }
 
 /// `<env>/.cvenv/env.json`
