@@ -21,8 +21,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: prefix-dev/setup-pixi@v0.8
+      - uses: prefix-dev/setup-pixi@v0.11.3
         with:
+          pixi-version: v0.84.2   # the version that wrote pixi.lock
           cache: true
       - name: Build (static, same script as `pixi run build`)
         run: pixi run build
