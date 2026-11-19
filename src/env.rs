@@ -128,6 +128,8 @@ pub struct Meta {
     pub prefix: Option<String>,
     /// command name -> absolute path inside the container (host-valid path layer)
     pub exec_paths: BTreeMap<String, String>,
+    /// hash of base image + build settings, to decide whether an incremental build is possible
+    pub build_cfg: Option<String>,
     /// wrap: the image reference it came from; wrap-install: the wrapped directory
     pub source: Option<String>,
     /// wrap-install: where the squashed tree is mounted (= its original path)

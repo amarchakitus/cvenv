@@ -57,8 +57,9 @@ Working with an env (uses the active env unless --env NAME|PATH is given)
   add [pixi add args]     add dependencies to the manifest (no build)
   remove [pixi remove args]
                           remove dependencies from the manifest (no build)
-  rebuild [--update] [--no-cache] [--slurm [--wait] [--slurm-args ARGS] | --local]
-                          (re)build the image from the manifest (here or as a Slurm job)
+  rebuild [--update] [--no-cache] [--incremental] [--slurm [--wait] [--slurm-args ARGS] | --local]
+                          (re)build the image from the manifest (here or as a Slurm job);
+                          --incremental reuses the current image, installing only changes
   run CMD [ARGS...]       run a command (or pixi task) inside the env
   exec CMD [ARGS...]      like run, but never interprets CMD as a pixi task
   shell                   interactive shell inside the container
@@ -192,6 +193,10 @@ enum Cmd {
         /// With --slurm: wait for the job to finish (sbatch --wait)
         #[arg(long)]
         wait: bool,
+        /// Start from the current image and only install what changed (falls back to a
+        /// full build when that's not possible)
+        #[arg(long)]
+        incremental: bool,
         #[arg(long, hide = true)]
         keep_build_dir: bool,
     },
@@ -280,18 +285,18 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Cmd::Share { env, world, group } => cmd_share(&env, world, group.as_deref()),
         Cmd::Envs => cmd_envs(),
         Cmd::Info { env } => cmd_info(env.as_deref()),
-        Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, keep_build_dir } => {
+        Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, incremental, keep_build_dir } => {
             let e = resolve_env(env.as_deref(), true, true)?;
             let mode_slurm = config::value("rebuild-mode").map(|m| m.trim().eq_ignore_ascii_case("slurm")).unwrap_or(false);
             // inside a Slurm job (e.g. the submitted build itself) always build locally
             let in_job = std::env::var_os("SLURM_JOB_ID").is_some();
             if slurm || (mode_slurm && !local && !in_job) {
-                build::submit_slurm(&e, update, no_cache, slurm_args.as_deref(), wait)
+                build::submit_slurm(&e, update, no_cache, incremental, slurm_args.as_deref(), wait)
             } else {
                 if !in_job && !local && util::which("sbatch").is_some() {
                     info("building on this node; for heavy envs use `cvenv rebuild --slurm` (or `cvenv config set rebuild-mode slurm`)");
                 }
-                build::build_env(&e, update, no_cache, keep_build_dir)
+                build::build_env(&e, update, no_cache, keep_build_dir, incremental)
             }
         }
         Cmd::Activate { name } => cmd_activate(name.as_deref()),

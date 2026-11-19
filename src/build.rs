@@ -1,9 +1,9 @@
 //! Building an env's image: definition file generation + `apptainer build`.
 
 use crate::config;
-use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Kind, Meta};
+use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Kind, Meta, BUILD_CFG_KEYS};
 use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_layer, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
-use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, username, warn, write_json};
+use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, sha256_bytes, username, warn, write_json};
 use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -25,9 +25,14 @@ pub fn parse_base_image(r: &str) -> (String, String) {
     ("docker".into(), r.to_string())
 }
 
-fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool) -> String {
-    let (bootstrap, from) = parse_base_image(base);
-    let post = env.cfg_str_list("post-commands");
+/// `incremental_from`: start from this existing image of the env (only the pixi
+/// install delta is applied; post-commands already ran when it was built).
+fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool, incremental_from: Option<&Path>) -> String {
+    let (bootstrap, from) = match incremental_from {
+        Some(img) => ("localimage".to_string(), img.display().to_string()),
+        None => parse_base_image(base),
+    };
+    let post = if incremental_from.is_some() { vec![] } else { env.cfg_str_list("post-commands") };
     let proj = env.manifest_dir();
     let cuda = std::env::var("CONDA_OVERRIDE_CUDA").ok().filter(|s| !s.is_empty()).or_else(|| cuda_requirement(env));
     let mut l: Vec<String> = vec![
@@ -131,7 +136,41 @@ fn default_base_image(pixi_host: &Path) -> String {
     format!("docker://ghcr.io/prefix-dev/pixi:{}", pixi_version(pixi_host).unwrap_or_else(|| "latest".into()))
 }
 
-pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool) -> Result<()> {
+/// Hash of what the image's base layer depends on (base image + build-relevant settings).
+fn build_cfg_hash(env: &Env, base: &str) -> String {
+    let cfg = env.cfg();
+    let mut m = BTreeMap::new();
+    for k in BUILD_CFG_KEYS {
+        if let Some(v) = cfg.get(*k) {
+            m.insert(k.to_string(), v.to_string());
+        }
+    }
+    m.insert("__base__".into(), base.to_string());
+    sha256_bytes(serde_json::to_string(&m).unwrap_or_default().as_bytes())
+}
+
+/// Why an incremental build is not possible (None = it is).
+fn incremental_blocker(env: &Env, base_hash: &str) -> Option<String> {
+    if !env.built() {
+        return Some("there is no previous image".into());
+    }
+    let meta = match env.meta() {
+        Some(m) => m,
+        None => return Some("the previous image has no build metadata".into()),
+    };
+    if meta.build_cfg.as_deref() != Some(base_hash) {
+        return Some("the base image or post-commands changed (or the image predates incremental support)".into());
+    }
+    if crate::util::normalize(&meta.manifest) != crate::util::normalize(&env.manifest) {
+        return Some("the env was moved since the last build".into());
+    }
+    if meta.pixi_env != env.pixi_env {
+        return Some("the pixi environment changed".into());
+    }
+    None
+}
+
+pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool, incremental: bool) -> Result<()> {
     match env.kind {
         Kind::Wrap => return crate::wrap::refresh_wrap(env),
         Kind::WrapInstall => return crate::wrap::refresh_install(env),
@@ -169,8 +208,17 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     };
     fs::create_dir_all(&cache)?;
 
+    let base_hash = build_cfg_hash(env, &base);
+    // copy of the current image to build from (the build replaces image.sif at the end)
+    let mut from_image: Option<PathBuf> = None;
+    if incremental {
+        match incremental_blocker(env, &base_hash) {
+            None => from_image = Some(env.image()),
+            Some(why) => info(&format!("incremental build not possible ({}); doing a full build", why)),
+        }
+    }
     let deffile = work.join("cvenv.def");
-    let def = make_deffile(env, &pixi_host, &base, update);
+    let def = make_deffile(env, &pixi_host, &base, update, from_image.as_deref());
     fs::write(&deffile, &def)?;
 
     let partial = PathBuf::from(format!("{}.partial", env.image().display()));
@@ -188,7 +236,12 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
         deffile.to_string_lossy().to_string(),
     ];
 
-    info(&format!("building env '{}' (pixi env '{}')", env.name, env.pixi_env));
+    info(&format!(
+        "building env '{}' (pixi env '{}'){}",
+        env.name,
+        env.pixi_env,
+        if from_image.is_some() { " incrementally from the current image" } else { "" }
+    ));
     info(&format!("  manifest   : {}", env.manifest.display()));
     info(&format!("  base image : {}", base));
     info(&format!("  build dir  : {}", work.display()));
@@ -262,6 +315,7 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
         kind: Kind::Pixi,
         prefix: prefix.clone(),
         exec_paths: exec_paths.clone(),
+        build_cfg: Some(base_hash.clone()),
         name: env.name.clone(),
         pixi_env: env.pixi_env.clone(),
         manifest: env.manifest.clone(),
@@ -336,7 +390,7 @@ pub fn is_building(env: &Env) -> bool {
 }
 
 /// Submit `cvenv rebuild --local` for `env` as a Slurm batch job.
-pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, extra: Option<&str>, wait: bool) -> Result<()> {
+pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: bool, extra: Option<&str>, wait: bool) -> Result<()> {
     let sbatch = crate::util::which("sbatch").ok_or_else(|| anyhow::anyhow!("sbatch not found: Slurm builds need a Slurm cluster"))?;
     if let Some((job, state)) = slurm_build_state(env) {
         bail!("env '{}' is already being built by Slurm job {} ({})", env.name, job, state);
@@ -352,6 +406,9 @@ pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, extra: Option<&s
     }
     if fresh_cache {
         cmd_line.push_str(" --no-cache");
+    }
+    if incremental {
+        cmd_line.push_str(" --incremental");
     }
     let script = env.art().join("build-job.sh");
     let log = env.art().join("build-%j.log");
