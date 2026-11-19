@@ -124,6 +124,8 @@ pub struct Meta {
     pub fingerprint: Fingerprint,
     pub stat: StatSig,
     pub bins: Vec<String>,
+    /// pixi env prefix inside the image (for the host-valid path layer)
+    pub prefix: Option<String>,
     /// command name -> absolute path inside the container (host-valid path layer)
     pub exec_paths: BTreeMap<String, String>,
     /// wrap: the image reference it came from; wrap-install: the wrapped directory

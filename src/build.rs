@@ -2,8 +2,9 @@
 
 use crate::config;
 use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Kind, Meta};
-use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
+use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_layer, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
 use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, username, warn, write_json};
+use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -80,6 +81,7 @@ fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool) -> String
         "    \"$PIXI\" install --manifest-path \"$M\" -e \"$E\"".to_string(),
         format!("    PREFIX=$(ls -d {}/*/envs/\"$E\" | head -n 1)", IMG_ENVS),
         format!("    ln -sfn \"$PREFIX\" {}/env", IMG_ROOT),
+        "    printf '%s\\n' \"$PREFIX\" > \"$OUT/prefix\"".to_string(),
         "    # Capture the pixi activation (incl. activate.d scripts) as a static env script".to_string(),
         "    BASE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
         "    _ENVI=\"env -i HOME=/root PATH=$BASE_PATH _CVENV_PIXI=$PIXI _CVENV_M=$M _CVENV_E=$E${CONDA_OVERRIDE_CUDA:+ CONDA_OVERRIDE_CUDA=$CONDA_OVERRIDE_CUDA}\"".to_string(),
@@ -251,8 +253,15 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
 
     let image_size = fs::metadata(env.image())?.len();
     let fresh = Env::new(&env.name, &env.record()); // re-read the manifest: the build may have touched it
+    let prefix = fs::read_to_string(out.join("prefix")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let exec_paths: BTreeMap<String, String> = match &prefix {
+        Some(p) => bins.iter().map(|b| (b.clone(), format!("{}/bin/{}", p, b))).collect(),
+        None => BTreeMap::new(),
+    };
     let meta = Meta {
         kind: Kind::Pixi,
+        prefix: prefix.clone(),
+        exec_paths: exec_paths.clone(),
         name: env.name.clone(),
         pixi_env: env.pixi_env.clone(),
         manifest: env.manifest.clone(),
@@ -269,6 +278,7 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
         ..Default::default()
     };
     write_json(&env.meta_path(), &meta)?;
+    write_layer(env, &exec_paths)?;
     env.write_env_file()?;
     let n = write_shims(env, &bins)?;
     if !keep_build_dir {

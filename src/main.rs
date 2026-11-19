@@ -527,6 +527,8 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
         if let Some(m) = &meta {
             println!("built at    : {} ({}s)", m.built_at, m.build_seconds);
             println!("base image  : {}", m.base_image);
+            let hv = e.art().join(runtime::LAYER_DIR).is_dir() || e.kind == Kind::WrapInstall;
+            println!("host paths  : {}", if hv { "valid (sys.executable etc. point to paths that exist on the host)" } else { "image-internal (rebuild to enable host-valid paths)" });
         }
         let n = fs::read_dir(e.shim_dir()).map(|rd| rd.filter_map(|x| x.ok()).filter(|x| x.file_name() != SHIM_LINK).count()).unwrap_or(0);
         println!("commands    : {} shimmed in {}", n, e.shim_dir().display());
