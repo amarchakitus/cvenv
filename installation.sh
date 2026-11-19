@@ -6,13 +6,13 @@
 # and only then changes anything. Use --headless for scripted installs.
 #
 #   ./installation.sh [options]
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/cvenv/main/installation.sh | bash -s -- [options]
+#   curl -fsSL https://raw.githubusercontent.com/amarchakitus/cvenv/main/installation.sh | bash -s -- [options]
 #
 # Options (each one pre-answers the matching question)
 #   --headless          no questions: use flags, current settings and detected defaults
 #                       (aliases: --yes, -y, --non-interactive)
 #   --version vX.Y.Z    release to install (default: latest)
-#   --repo OWNER/NAME   GitHub repo with the releases (default: from `git remote origin`)
+#   --repo OWNER/NAME   GitHub repo with the releases (default: amarchakitus/cvenv)
 #   --url URL           download the binary from this URL
 #   --binary PATH       install this local binary
 #   --from-source       build from source with pixi (development; needs a git checkout)
@@ -32,7 +32,7 @@ set -euo pipefail
 
 # Fill this in once the GitHub repo exists, so `curl ... | bash` installs work
 # without a checkout (a clone's `origin` remote is used automatically otherwise).
-DEFAULT_GITHUB_REPO="${CVENV_GITHUB_REPO:-}"   # e.g. "OWNER/cvenv"
+DEFAULT_GITHUB_REPO="${CVENV_GITHUB_REPO:-amarchakitus/cvenv}"
 
 SRC_DIR=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then

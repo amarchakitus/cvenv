@@ -1,6 +1,7 @@
 # cvenv — guide for AI agents
 
-`cvenv` runs **pixi environments packed into single-file Apptainer images**. It exists because the
+`cvenv` runs **pixi environments packed into single-file Apptainer images** (and can also wrap
+existing containers and existing installations). It exists because the
 filesystem has a strict **file-count quota**: a normal conda/pixi/venv env (10k–200k files) must
 not be created on it. Each cvenv env is a plain pixi workspace (`pixi.toml` + `pixi.lock`); the
 installed environment lives inside `<env>/.cvenv/image.sif` (one file). Commands run inside the
@@ -24,6 +25,8 @@ Print this guide any time: `cvenv agent-guide`.
    the image still contains the old packages and cvenv prints a staleness warning.
 6. Batch dependency changes: several `cvenv add` calls, then **one** rebuild.
 7. Don't edit or delete files under `<env>/.cvenv/` by hand (except reading logs).
+8. **Ask the user before** `cvenv wrap-install ... --replace`, `cvenv share`, `cvenv unregister --delete`,
+   or deleting any `*.cvenv-orig-*` backup: these change or remove the user's files or permissions.
 
 ## Decide what to do
 
@@ -38,6 +41,11 @@ Print this guide any time: `cvenv agent-guide`.
 | Status `queued (job N)` / `building (job N)` | a Slurm build is in progress; wait, check `<env>/.cvenv/build-N.log` |
 | Need a GPU | run inside a GPU Slurm allocation; `--nv` is added automatically when `/dev/nvidia*` exists |
 | Project already has a `pixi.toml`/`pyproject.toml` | `cvenv init NAME --manifest /path/to/project` (registers it; image goes to `<store>/NAME/.cvenv/`) |
+| Project has an `environment.yml` / `requirements.txt` | `cvenv init NAME --import environment.yml` (or `--import requirements.txt --python 3.12`) → rebuild |
+| Need a prebuilt container (NGC, vendor image, `.sif`) | `cvenv wrap NAME docker://nvcr.io/nvidia/pytorch:24.10-py3` (or a `.sif` path, `--link` to not copy) |
+| An existing big env/software tree eats the file quota | (ask first) `cvenv wrap-install NAME /path/to/env --replace` → verify → user deletes `/path/to/env.cvenv-orig-*` |
+| Someone shared an env directory | `cvenv run --env /path/to/env CMD` (no setup) or `cvenv register /path/to/env` once |
+| Small dependency change to a big env | `cvenv rebuild --env NAME --incremental` (reuses the current image; auto falls back to a full build) |
 
 Prefer conda-forge packages (`cvenv add numpy`); use `--pypi` only for packages not on conda-forge.
 GPU builds of PyTorch etc. need a CUDA system requirement in the manifest: create the env with
@@ -56,6 +64,13 @@ cvenv init NAME python=3.12 numpy pandas     # writes <store>/NAME/pixi.toml onl
 cvenv init NAME --path /some/dir python=3.12 # custom location
 cvenv rebuild --env NAME                     # local build (~1 min for small envs)
 cvenv rebuild --env NAME --slurm --wait      # build as a Slurm job, block until done (exit code = job result)
+cvenv rebuild --env NAME --incremental       # only install what changed (combinable with --slurm)
+cvenv init NAME --import environment.yml     # or requirements.txt [--python 3.12]
+
+# other env kinds
+cvenv wrap NAME docker://python:3.12-slim    # existing container; settings in <env>/cvenv.toml
+cvenv wrap-install NAME /path/to/conda-env   # squash an existing install; --replace leaves a stub
+cvenv run --env /path/to/env python x.py     # any env by directory (also shared ones)
 
 # change dependencies (manifest only), then rebuild
 cvenv add --env NAME "scipy>=1.11" xarray
@@ -85,8 +100,11 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
 - **Streams:** data/listings (`envs`, `info`, `list`, `config`) → stdout; status, warnings
   (`cvenv: warning:`) and build logs → stderr. `cvenv activate`/`deactivate` print shell code on
   stdout meant for `eval`.
-- **Inside the container:** `python`, `pip`, etc. resolve to the env; `sys.executable` is a path under
-  `/opt/cvenv/...` that exists only inside the image. Host env vars (incl. `SLURM_*`,
+- **Inside the container:** `python`, `pip`, etc. resolve to the env. `sys.executable` is
+  `<env>/.cvenv/bin/python`, valid on the host too (it is the shim there), so tools that re-launch
+  the interpreter elsewhere (dask-jobqueue, ipykernel install, multiprocessing spawn) work. Console
+  scripts (`jupyter`, …) still record the image-internal path; prefer `python -m MODULE` when that matters.
+  Envs built by older cvenv versions need one rebuild for this (`cvenv info` shows "host paths"). Host env vars (incl. `SLURM_*`,
   `CUDA_VISIBLE_DEVICES`, `OMP_NUM_THREADS`) pass through; `PYTHONHOME`, `VIRTUAL_ENV` and host
   `CONDA_*` are dropped; `PYTHONNOUSERSITE=1` (no `~/.local` packages).
 - **Visible paths:** `$HOME`, `/tmp`, the cwd, the env's manifest dir and the site bind paths
@@ -97,6 +115,12 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
   start `python` thousands of times; loop inside Python or `cvenv run --env NAME bash script.sh`.
 - **Host-only tools are not available inside the container** (e.g. `sbatch`, `squeue`, `module`).
   Call them from the host shell, not from Python running in the env.
+- **Env kinds** (`cvenv envs` KIND column): `pixi` (manifest-based; add/remove/rebuild), `wrap`
+  (existing image; `rebuild` re-pulls it), `wrap-install` (squashed existing tree mounted at its
+  original path; `add`/`remove` don't apply). `cvenv list --env NAME` shows packages (pixi) or
+  exposed commands (wrapped).
+- **Shared envs:** anyone who can read the env directory can use it (`--env PATH`, shims, `register`);
+  only the owner can rebuild. `cvenv info` shows "(not in your registry)" for such envs.
 - **Staleness check:** compares dependency-relevant manifest content + `pixi.lock` with the image.
   Editing tasks/description does not make an env stale. `CVENV_NO_STALE_WARNING=1` silences it.
 - **Rebuilds are atomic:** running jobs keep using the old image; failed builds leave the old image intact.
@@ -129,7 +153,10 @@ partition), `build-tmpdir` (node-local scratch for builds). Change with
 | Symptom | Cause / fix |
 |---|---|
 | `no env selected` | pass `--env NAME` |
-| `unknown env 'X'` | `cvenv envs` for names; `cvenv init` to create |
+| `unknown env 'X'` | `cvenv envs` for names; `cvenv init` to create; a shared env works by path: `--env /path` |
+| `needs a pixi env, but 'X' is a wrap env` | wrapped envs have no manifest; change the source image (`cvenv wrap`) instead |
+| `only its owner can rebuild it` | shared env: ask its owner, or make your own copy (`cvenv init NAME --manifest /path/to/env/pixi.toml`) |
+| `incremental build not possible (...)` | informational; a full build runs instead |
 | `has not been built yet` | `cvenv rebuild --env NAME` |
 | build fails | read `<env>/.cvenv/build.log` (or `build-<jobid>.log`); usual causes: bad package name/version spec, solver conflict, no network on the build node |
 | `Virtual package '__cuda' does not match` | env needs `[system-requirements] cuda = "12.x"` (`cvenv init --cuda`) |
