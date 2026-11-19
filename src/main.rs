@@ -15,7 +15,7 @@ mod runtime;
 mod util;
 mod wrap;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Env, Kind, Record, SHIM_LINK};
 use runtime::{exec_in_container, find_pixi, gpu_flags, IMG_PIXI};
@@ -32,8 +32,9 @@ const HELP: &str = "\
 cvenv - pixi environments in single-file Apptainer images
 
 Environment management
-  init NAME [--path DIR] [--manifest FILE] [-c CH] [--cuda VER] [PKG...]
-                          create (or adopt) a pixi workspace and register it
+  init NAME [--path DIR] [--manifest FILE] [--import FILE] [-c CH] [--cuda VER] [PKG...]
+                          create (or adopt) a pixi workspace and register it;
+                          --import takes an environment.yml or requirements.txt
   wrap NAME IMAGE [--link] [--bin-dir DIR] [--command CMD]
                           use an existing container (file.sif, docker://, oras://...)
   wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace]
@@ -104,6 +105,12 @@ enum Cmd {
         /// Add `[system-requirements] cuda = VER` (needed to resolve GPU builds)
         #[arg(long)]
         cuda: Option<String>,
+        /// Create the manifest from a conda environment.yml or a pip requirements.txt
+        #[arg(long = "import", value_name = "FILE")]
+        import: Option<String>,
+        /// Python version for --import requirements.txt (default 3.12)
+        #[arg(long)]
+        python: Option<String>,
         /// Packages to add to a new manifest
         packages: Vec<String>,
     },
@@ -272,8 +279,8 @@ fn dispatch(argv: &[String]) -> Result<()> {
     }
     let cli = Cli::parse_from(std::iter::once("cvenv".to_string()).chain(argv.iter().cloned()));
     match cli.cmd {
-        Cmd::Init { name, path, manifest, pixi_env, channel, platform, cuda, packages } => {
-            cmd_init(&name, path, manifest, pixi_env, channel, platform, cuda, packages)
+        Cmd::Init { name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages } => {
+            cmd_init(&name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages)
         }
         Cmd::Wrap { name, image, path, link, bin_dir, command } => {
             wrap::cmd_wrap(&name, &image, path, wrap::WrapOpts { link, bin_dirs: bin_dir, commands: command })
@@ -363,6 +370,8 @@ fn cmd_init(
     channels: Vec<String>,
     platforms: Vec<String>,
     cuda: Option<String>,
+    import: Option<String>,
+    python: Option<String>,
     packages: Vec<String>,
 ) -> Result<()> {
     if !valid_name(name) {
@@ -379,6 +388,22 @@ fn cmd_init(
         }
     }
 
+    let import = import.map(|f| expand(&f));
+    if let Some(f) = &import {
+        if !f.is_file() {
+            bail!("--import: {} not found", f.display());
+        }
+        if manifest.is_some() {
+            bail!("--import and --manifest can't be combined");
+        }
+        if path.is_dir() && find_manifest(&path).is_some() {
+            bail!("{} already has a manifest; --import needs a new env directory", path.display());
+        }
+    }
+    let import_kind = import.as_ref().map(|f| {
+        let n = f.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        if n.ends_with(".yml") || n.ends_with(".yaml") { "conda" } else { "pip" }
+    });
     let (manifest, created) = if let Some(m) = manifest {
         let mf = find_manifest(Path::new(&m)).ok_or_else(|| anyhow::anyhow!("no pixi.toml/pyproject.toml found at {}", m))?;
         fs::create_dir_all(&path)?;
@@ -388,10 +413,17 @@ fn cmd_init(
         (mf, false)
     } else {
         let pixi = find_pixi()?;
+        let existed = path.is_dir();
         fs::create_dir_all(&path)?;
         let mut cmd = Command::new(&pixi);
-        cmd.arg("init").arg(&path).args(["--format", "pixi"]);
-        let channels = if channels.is_empty() { vec!["conda-forge".to_string()] } else { channels };
+        cmd.arg("init").arg(&path);
+        if import_kind == Some("conda") {
+            // pixi converts environment.yml (channels, conda deps and the pip: section)
+            cmd.arg("--import").arg(import.as_ref().unwrap());
+        } else {
+            cmd.args(["--format", "pixi"]);
+        }
+        let channels = if channels.is_empty() && import_kind != Some("conda") { vec!["conda-forge".to_string()] } else { channels };
         let platforms = if platforms.is_empty() { vec!["linux-64".to_string()] } else { platforms };
         for c in &channels {
             cmd.args(["-c", c]);
@@ -400,6 +432,9 @@ fn cmd_init(
             cmd.args(["-p", p]);
         }
         if !cmd.status()?.success() {
+            if !existed {
+                let _ = fs::remove_dir(&path); // only removes it if still empty
+            }
             bail!("`pixi init` failed");
         }
         let mf = path.join("pixi.toml");
@@ -443,6 +478,11 @@ fn cmd_init(
     runtime::write_activate_script(&env)?;
     env.write_env_file()?;
 
+    if import_kind == Some("pip") {
+        import_requirements(&manifest, import.as_ref().unwrap(), python.as_deref().unwrap_or("3.12"))?;
+    } else if python.is_some() {
+        warn("--python only applies to --import requirements.txt; use `cvenv add python=X.Y`");
+    }
     if created && !packages.is_empty() {
         let ok = Command::new(find_pixi()?)
             .arg("add")
@@ -457,6 +497,9 @@ fn cmd_init(
         }
     } else if !packages.is_empty() {
         warn("packages are only added to newly created manifests; use `cvenv add`");
+    }
+    if let Some(f) = &import {
+        info(&format!("imported {} into {}", f.display(), manifest.display()));
     }
     info(&format!("created env '{}' in {}", name, path.display()));
     println!(
@@ -1039,5 +1082,80 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
         p = e.path.display(),
         n = e.name
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// --import requirements.txt
+// ---------------------------------------------------------------------------
+
+/// Requirement specs from a pip requirements file (follows -r includes).
+fn parse_requirements(file: &Path, out: &mut Vec<String>, depth: usize) -> Result<()> {
+    if depth > 10 {
+        bail!("requirements includes nested too deeply at {}", file.display());
+    }
+    let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let base = file.parent().unwrap_or(Path::new("."));
+    let joined = text.replace("\\\n", " ");
+    for raw in joined.lines() {
+        // strip comments (pip: '#' preceded by whitespace or at line start)
+        let line = match raw.find(" #") {
+            Some(i) => &raw[..i],
+            None if raw.trim_start().starts_with('#') => "",
+            None => raw,
+        };
+        // drop per-requirement options such as --hash=...
+        let line: String = line.split_whitespace().filter(|w| !w.starts_with("--hash")).collect::<Vec<_>>().join(" ");
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(inc) = line.strip_prefix("-r ").or_else(|| line.strip_prefix("--requirement ")).or_else(|| line.strip_prefix("--requirement=")) {
+            parse_requirements(&base.join(inc.trim()), out, depth + 1)?;
+        } else if line.starts_with('-') {
+            warn(&format!(
+                "skipping unsupported requirements option `{}` (index URLs go in [pypi-options], editable/local packages via `cvenv add --pypi NAME --path DIR --editable`)",
+                line
+            ));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn import_requirements(manifest: &Path, file: &Path, python: &str) -> Result<()> {
+    let mut specs = vec![];
+    parse_requirements(file, &mut specs, 0)?;
+    let pixi = find_pixi()?;
+    let has_python = fs::read_to_string(manifest).map(|s| s.lines().any(|l| l.trim_start().starts_with("python ") || l.trim_start().starts_with("python="))).unwrap_or(false);
+    if !has_python {
+        let spec = if python.contains(['=', '<', '>', '*']) { format!("python{}", if python.starts_with(['=', '<', '>']) { python.to_string() } else { format!("={}", python) }) } else { format!("python={}", python) };
+        let ok = Command::new(&pixi).args(["add", "--frozen", "--manifest-path"]).arg(manifest).arg(&spec).status()?.success();
+        if !ok {
+            bail!("adding {} failed", spec);
+        }
+    }
+    let mut failed = vec![];
+    for spec in &specs {
+        let ok = Command::new(&pixi)
+            .args(["add", "--frozen", "--pypi", "--manifest-path"])
+            .arg(manifest)
+            .arg(spec)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?
+            .success();
+        if !ok {
+            failed.push(spec.clone());
+        }
+    }
+    info(&format!("imported {} of {} requirements as pypi-dependencies", specs.len() - failed.len(), specs.len()));
+    if !failed.is_empty() {
+        warn(&format!("could not add (edit [pypi-dependencies] in {} by hand):", manifest.display()));
+        for f in failed {
+            eprintln!("        {}", f);
+        }
+    }
     Ok(())
 }
