@@ -1,0 +1,6 @@
+# build output (pixi run build)
+/bin/cvenv
+/target/
+# machine-local install state (written by installation.sh)
+/etc/install.conf
+/.pixi/

@@ -1,0 +1,15 @@
+# Build environment for cvenv itself: `pixi run build` -> bin/cvenv
+# installation.sh points this env (and all caches) at node-local /tmp, so the
+# toolchain's many files never touch a quota'd filesystem.
+[workspace]
+name = "cvenv"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+rust = ">=1.87"
+c-compiler = "*"
+
+[tasks]
+build = "bash scripts/build.sh"
+test = "bash scripts/build.sh --test"
