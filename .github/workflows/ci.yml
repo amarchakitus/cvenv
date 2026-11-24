@@ -37,8 +37,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: rustfmt + clippy
         run: pixi run lint
-      - name: shellcheck   # preinstalled on GitHub's Ubuntu runners
-        run: shellcheck installation.sh scripts/*.sh
+      - name: shellcheck   # pinned: the runner's preinstalled version differs
+        run: pixi exec --spec shellcheck==0.11.0 shellcheck installation.sh scripts/*.sh
 
   binaries:
     name: binary (${{ matrix.triple }})
