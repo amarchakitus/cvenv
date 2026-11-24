@@ -26,8 +26,8 @@ For a non-interactive install:
 ./installation.sh --yes --store /project/me/envs --slurm-args "-A myacct -p mypart" --modify-rc
 ```
 
-Re-run the installer to upgrade; your settings are kept. See `./installation.sh --help` for all
-options.
+Update with `cvenv self-update`. Re-running the installer also works and refreshes pixi and
+squashfuse; your settings are kept either way. See `./installation.sh --help` for all options.
 
 ## Quick start
 
@@ -64,6 +64,7 @@ For a GPU env, declare the CUDA version: `cvenv init gpuenv --cuda 12.0 python=3
 | `cvenv share NAME`, `cvenv register PATH` | Shares an env with your group, or adds a shared one |
 | `cvenv unregister NAME [--delete]` | Forgets an env, optionally deleting its files |
 | `cvenv config [get\|set\|unset KEY [VALUE]]` | Shows or changes settings |
+| `cvenv self-update` | Updates cvenv to the latest release (`--check`, `--version VER`) |
 
 Commands act on the env given by `--env NAME` (or `--env /path/to/env`), otherwise on the active
 env or the env whose directory you are in. `cvenv agent-guide` prints a usage guide for AI

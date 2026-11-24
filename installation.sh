@@ -413,6 +413,7 @@ export CVENV_INSTALL_APPTAINER=$(printf '%q' "$APPT")
 export CVENV_INSTALL_APPTAINER_CONF=$(printf '%q' "$APPT_CONF")
 export CVENV_INSTALL_SQUASHFUSE=$(printf '%q' "$SQFS")
 export CVENV_INSTALL_BUILD_TMPDIR=$(printf '%q' "$BUILD_TMP")
+export CVENV_INSTALL_REPO=$(printf '%q' "$REPO_SLUG")
 EOF
 cfg() {  # cfg set|unset KEY [VALUE] - quiet unless it fails
     local out
@@ -468,5 +469,5 @@ cat >&2 <<'EOF'
     cvenv rebuild --env myenv
     cvenv run --env myenv python
 
-  Settings: cvenv config    Help: cvenv --help
+  Settings: cvenv config    Help: cvenv --help    Update: cvenv self-update
 EOF

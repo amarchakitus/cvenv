@@ -24,6 +24,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("base-image", "CVENV_BASE_IMAGE", "default base image for builds"),
     ("rebuild-mode", "CVENV_REBUILD_MODE", "where `cvenv rebuild` builds: local | slurm"),
     ("slurm-args", "CVENV_SLURM_ARGS", "sbatch arguments for `cvenv rebuild --slurm`"),
+    ("repo", "CVENV_REPO", "GitHub repo that `cvenv self-update` installs releases from"),
 ];
 
 pub const PATH_KEYS: &[&str] = &["store", "apptainer", "apptainer-conf", "squashfuse", "mount-root", "pixi", "build-tmpdir", "pixi-cache"];
