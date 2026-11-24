@@ -148,6 +148,18 @@ pub fn install_release(base: &str, tag: &str, triple: &str, target: &Path) -> Re
     Ok(version)
 }
 
+/// What installing `tag` over `current` does: (message, is it a downgrade?).
+fn action_message(current: &str, tag: &str) -> (String, bool) {
+    let target = tag.trim_start_matches('v');
+    if is_newer(tag, current) {
+        (format!("updating cvenv {} -> {}", current, target), false)
+    } else if parse_version(tag) == parse_version(current) {
+        (format!("reinstalling cvenv {}", current), false)
+    } else {
+        (format!("downgrading cvenv {} -> {}", current, target), true)
+    }
+}
+
 pub fn self_update(check: bool, version: Option<String>, force: bool) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let exe = config::exe_path();
@@ -195,10 +207,9 @@ pub fn self_update(check: bool, version: Option<String>, force: bool) -> Result<
             dir.display()
         );
     }
-    if !explicit || newer {
-        info(&format!("updating cvenv {} -> {}", current, tag.trim_start_matches('v')));
-    } else {
-        warn(&format!("installing cvenv {} over {}", tag.trim_start_matches('v'), current));
+    match action_message(current, &tag) {
+        (msg, false) => info(&msg),
+        (msg, true) => warn(&msg),
     }
     let new_version = install_release(&base, &tag, triple, &exe)?;
     info(&format!("installed {} at {}", new_version, exe.display()));
@@ -222,6 +233,13 @@ mod tests {
         assert!(!is_newer("garbage", "0.3.0"));
         assert_eq!(normalize_tag("0.3.0"), "v0.3.0");
         assert_eq!(normalize_tag("v0.3.0"), "v0.3.0");
+    }
+
+    #[test]
+    fn action_messages() {
+        assert_eq!(action_message("0.4.0", "v0.5.0"), ("updating cvenv 0.4.0 -> 0.5.0".to_string(), false));
+        assert_eq!(action_message("0.4.0", "v0.4.0"), ("reinstalling cvenv 0.4.0".to_string(), false));
+        assert_eq!(action_message("0.4.0", "v0.3.0"), ("downgrading cvenv 0.4.0 -> 0.3.0".to_string(), true));
     }
 
     #[test]
