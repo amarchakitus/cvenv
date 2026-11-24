@@ -498,6 +498,23 @@ pub fn ensure_art_dir(dir: &Path) -> Result<PathBuf> {
     Ok(art)
 }
 
+/// A valid env name derived from a directory name (`My Project` -> `My-Project`).
+pub fn name_from_dir(dir: &Path) -> Option<String> {
+    let base = dir.file_name()?.to_string_lossy();
+    let n: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let n = n.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    valid_name(n).then(|| n.to_string())
+}
+
 pub fn valid_name(n: &str) -> bool {
     let mut chars = n.chars();
     match chars.next() {

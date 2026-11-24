@@ -44,6 +44,9 @@ Environment management
   init NAME [--path DIR] [--manifest FILE] [--import FILE] [-c CH] [--cuda VER] [PKG...]
                           create (or adopt) a pixi workspace and register it;
                           --import takes an environment.yml or requirements.txt
+  init DIR [--name NAME] [--vcs git|none] [...]
+                          same for a project directory (e.g. `.`): pixi.toml and a
+                          git repo there, the images in <store>/NAME
   wrap NAME IMAGE [--link] [--bin-dir DIR] [--command CMD]
                           use an existing container (file.sif, docker://, oras://...)
   wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace] [--backend B]
@@ -106,10 +109,18 @@ struct Cli {
 enum Cmd {
     /// Create (or adopt) a pixi workspace and register it as an env
     Init {
+        /// Env name, or a project directory (`.`, `~/proj`, `path/to/dir`): the manifest
+        /// goes there, the images to <store>/NAME
         name: String,
-        /// Env directory (default: <store>/NAME)
+        /// Env name for a project directory (default: the directory's name)
+        #[arg(long = "name", value_name = "NAME")]
+        env_name: Option<String>,
+        /// Env directory holding the images (default: <store>/NAME)
         #[arg(long)]
         path: Option<String>,
+        /// Create a git repository: default for new manifests outside the store
+        #[arg(long, value_parser = ["git", "none"])]
+        vcs: Option<String>,
         /// Register an existing pixi.toml/pyproject.toml (or its directory)
         #[arg(long)]
         manifest: Option<String>,
@@ -326,7 +337,9 @@ fn dispatch(argv: &[String]) -> Result<()> {
     match cli.cmd {
         Cmd::Init {
             name,
+            env_name,
             path,
+            vcs,
             manifest,
             pixi_env,
             channel,
@@ -336,7 +349,8 @@ fn dispatch(argv: &[String]) -> Result<()> {
             python,
             packages,
         } => cmd_init(
-            &name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages,
+            &name, env_name, path, vcs, manifest, pixi_env, channel, platform, cuda, import,
+            python, packages,
         ),
         Cmd::Wrap {
             name,
@@ -502,8 +516,10 @@ fn shim_main(shim_dir: &Path, prog: &str, args: &[String]) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_init(
-    name: &str,
+    name_arg: &str,
+    env_name: Option<String>,
     path: Option<String>,
+    vcs: Option<String>,
     manifest: Option<String>,
     pixi_env: Option<String>,
     channels: Vec<String>,
@@ -513,6 +529,28 @@ fn cmd_init(
     python: Option<String>,
     packages: Vec<String>,
 ) -> Result<()> {
+    // `cvenv init .`: a project directory instead of a name (like `uv init .`)
+    let project = looks_like_path(name_arg).then(|| expand(name_arg));
+    let name = match (&project, env_name) {
+        (Some(_), _) if manifest.is_some() => {
+            bail!("--manifest can't be combined with a project directory (it is the manifest)")
+        }
+        (Some(_), Some(n)) => n,
+        (Some(dir), None) => env::name_from_dir(dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "can't derive an env name from {}; pass --name",
+                dir.display()
+            )
+        })?,
+        (None, Some(_)) => {
+            bail!("--name is only for `cvenv init DIR`; the env name is the first argument")
+        }
+        (None, None) => name_arg.to_string(),
+    };
+    let name = name.as_str();
+    if vcs.as_deref() == Some("git") && util::which("git").is_none() {
+        bail!("--vcs git: git not found on PATH");
+    }
     if !valid_name(name) {
         bail!(
             "invalid env name '{}' (use letters, digits, '.', '_' and '-')",
@@ -532,6 +570,9 @@ fn cmd_init(
         }
     }
 
+    // where the manifest is looked for / created: the project dir, else the env dir
+    let ws = project.clone().unwrap_or_else(|| path.clone());
+
     let import = import.map(|f| expand(&f));
     if let Some(f) = &import {
         if !f.is_file() {
@@ -540,10 +581,10 @@ fn cmd_init(
         if manifest.is_some() {
             bail!("--import and --manifest can't be combined");
         }
-        if path.is_dir() && find_manifest(&path).is_some() {
+        if ws.is_dir() && find_manifest(&ws).is_some() {
             bail!(
-                "{} already has a manifest; --import needs a new env directory",
-                path.display()
+                "{} already has a manifest; --import needs a new directory",
+                ws.display()
             );
         }
     }
@@ -564,8 +605,8 @@ fn cmd_init(
             .ok_or_else(|| anyhow::anyhow!("no pixi.toml/pyproject.toml found at {}", m))?;
         fs::create_dir_all(&path)?;
         (mf, false)
-    } else if let Some(mf) = if path.is_dir() {
-        find_manifest(&path)
+    } else if let Some(mf) = if ws.is_dir() {
+        find_manifest(&ws)
     } else {
         None
     } {
@@ -573,10 +614,10 @@ fn cmd_init(
         (mf, false)
     } else {
         let pixi = find_pixi()?;
-        let existed = path.is_dir();
-        fs::create_dir_all(&path)?;
+        let existed = ws.is_dir();
+        fs::create_dir_all(&ws)?;
         let mut cmd = Command::new(&pixi);
-        cmd.arg("init").arg(&path);
+        cmd.arg("init").arg(&ws);
         if import_kind == Some("conda") {
             // pixi converts environment.yml (channels, conda deps and the pip: section)
             cmd.arg("--import").arg(import.as_ref().unwrap());
@@ -601,11 +642,11 @@ fn cmd_init(
         }
         if !cmd.status()?.success() {
             if !existed {
-                let _ = fs::remove_dir(&path); // only removes it if still empty
+                let _ = fs::remove_dir(&ws); // only removes it if still empty
             }
             bail!("`pixi init` failed");
         }
-        let mf = path.join("pixi.toml");
+        let mf = ws.join("pixi.toml");
         if let Some(c) = &cuda {
             let mut s = fs::read_to_string(&mf)?;
             s.push_str(&format!("\n[system-requirements]\ncuda = \"{}\"\n", c));
@@ -617,6 +658,20 @@ fn cmd_init(
         warn("--cuda only applies to newly created manifests; add [system-requirements] by hand");
     }
 
+    // like `uv init`: a git repo for new projects, never nested in an existing one
+    let want_git = match vcs.as_deref() {
+        Some("git") => true,
+        Some(_) => false,
+        None => created && !is_under(&ws, &config::store_dir()) && util::which("git").is_some(),
+    };
+    if want_git && !inside_git_repo(&ws) {
+        match Command::new("git").args(["init", "-q"]).arg(&ws).status() {
+            Ok(st) if st.success() => {
+                info(&format!("initialized a git repository in {}", ws.display()))
+            }
+            _ => warn("`git init` failed; continuing without a repository"),
+        }
+    }
     // `.cvenv/` ignores itself in git (see ensure_art_dir)
     env::ensure_art_dir(&path)?;
 
@@ -1379,6 +1434,22 @@ fn cmd_shell(argv: &[String]) -> Result<()> {
     exec_in_container(&e, &rest, "shell")
 }
 
+/// `cvenv init` argument that is a directory rather than an env name.
+fn looks_like_path(s: &str) -> bool {
+    s == "." || s == ".." || s.starts_with('~') || s.contains('/')
+}
+
+fn inside_git_repo(dir: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn require_pixi(e: &Env, verb: &str) -> Result<()> {
     if !e.is_pixi() {
         bail!(
@@ -1715,6 +1786,22 @@ mod tests {
         let (n, r) = split_env_opt(&s(&["--env=bar", "--", "-c", "1"]), true).unwrap();
         assert_eq!(n.as_deref(), Some("bar"));
         assert_eq!(r, s(&["-c", "1"]));
+    }
+
+    #[test]
+    fn init_project_dir() {
+        for p in [".", "..", "~", "~/proj", "./x", "a/b", "/abs"] {
+            assert!(looks_like_path(p), "{p}");
+        }
+        for n in ["myenv", "my.env", "py3-12"] {
+            assert!(!looks_like_path(n), "{n}");
+        }
+        let n = |p: &str| env::name_from_dir(Path::new(p));
+        assert_eq!(n("/home/me/myproj").as_deref(), Some("myproj"));
+        assert_eq!(n("/x/My Project").as_deref(), Some("My-Project"));
+        assert_eq!(n("/x/.hidden").as_deref(), Some("hidden"));
+        assert_eq!(n("/x/___"), None);
+        assert_eq!(n("/"), None);
     }
 
     #[test]

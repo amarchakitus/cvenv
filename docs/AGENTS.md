@@ -48,7 +48,8 @@ Print this guide any time: `cvenv agent-guide`.
 | Env status `moved` | works as-is; rebuild only if pixi tasks or editable/path deps are used |
 | Status `queued (job N)` / `building (job N)` | a Slurm build is in progress; wait, check `<env>/.cvenv/build-N.log` |
 | Need a GPU | run inside a GPU Slurm allocation; `--nv` is added automatically when `/dev/nvidia*` exists |
-| Project already has a `pixi.toml`/`pyproject.toml` | `cvenv init NAME --manifest /path/to/project` (registers it; image goes to `<store>/NAME/.cvenv/`) |
+| Project already has a `pixi.toml`/`pyproject.toml` | `cvenv init /path/to/project` (env named after the directory) or `cvenv init NAME --manifest /path/to/project`; image goes to `<store>/NAME/.cvenv/` |
+| New env for the current project | `cvenv init . python=3.12 pkg1` (pixi.toml here, image in `<store>/<dir name>`); creates a git repo unless already inside one; `--vcs none` to skip |
 | Project has an `environment.yml` / `requirements.txt` | `cvenv init NAME --import environment.yml` (or `--import requirements.txt --python 3.12`) → rebuild |
 | Need a prebuilt container (NGC, vendor image, `.sif`) | `cvenv wrap NAME docker://nvcr.io/nvidia/pytorch:24.10-py3` (or a `.sif` path, `--link` to not copy) |
 | An existing big env/software tree eats the file quota | (ask first) `cvenv wrap-install NAME /path/to/env --replace` → verify → user deletes `/path/to/env.cvenv-orig-*` |
@@ -71,6 +72,7 @@ cvenv list --env NAME numpy                  # installed packages (substring fil
 # create + build
 cvenv init NAME python=3.12 numpy pandas     # writes <store>/NAME/pixi.toml only; no build
 cvenv init NAME --path /some/dir python=3.12 # custom location
+cvenv init . python=3.12                     # project dir: pixi.toml (+ git repo) here, image in <store>/<dir name>
 cvenv rebuild --env NAME                     # local build (~1 min for small envs)
 cvenv rebuild --env NAME --slurm --wait      # build as a Slurm job, block until done (exit code = job result)
 cvenv rebuild --env NAME --incremental       # only install what changed (combinable with --slurm)
