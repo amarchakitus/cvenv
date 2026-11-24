@@ -1,12 +1,19 @@
 # cvenv — guide for AI agents
 
-`cvenv` runs **pixi environments packed into single-file Apptainer images** (and can also wrap
+`cvenv` runs **pixi environments packed into single-file images** (and can also wrap
 existing containers and existing installations). It exists because the
 filesystem has a strict **file-count quota**: a normal conda/pixi/venv env (10k–200k files) must
 not be created on it. Each cvenv env is a plain pixi workspace (`pixi.toml` + `pixi.lock`); the
-installed environment lives inside `<env>/.cvenv/image.sif` (one file). Commands run inside the
-container with the host env vars, cwd, `$HOME`, `/tmp`, site paths (e.g. `/project`, `/scratch`)
-and GPUs passed through.
+installed environment lives in one image file under `<env>/.cvenv/`. Two backends (`cvenv envs`
+BACKEND column, `cvenv info`):
+
+- **apptainer** (`image.sif`): commands run inside a container with the host env vars, cwd,
+  `$HOME`, `/tmp`, site paths (e.g. `/project`, `/scratch`) and GPUs passed through.
+- **squashfuse** (`image-<build>.sqfs`): the image is mounted (no root) at
+  `<mount-root>/<env-id>/<build>/` (default mount root `<store>/.cvenv-mnt/`) on first use on a
+  node; commands run directly on the host from there.
+
+You use both the same way (`cvenv run`, shims, `activate`).
 
 Print this guide any time: `cvenv agent-guide`.
 
@@ -46,6 +53,7 @@ Print this guide any time: `cvenv agent-guide`.
 | An existing big env/software tree eats the file quota | (ask first) `cvenv wrap-install NAME /path/to/env --replace` → verify → user deletes `/path/to/env.cvenv-orig-*` |
 | Someone shared an env directory | `cvenv run --env /path/to/env CMD` (no setup) or `cvenv register /path/to/env` once |
 | Small dependency change to a big env | `cvenv rebuild --env NAME --incremental` (reuses the current image; auto falls back to a full build) |
+| Apptainer missing or broken on this cluster | builds use squashfuse automatically when Apptainer isn't installed; otherwise `cvenv rebuild --env NAME --backend squashfuse` (ask before changing the global `backend` setting) |
 
 Prefer conda-forge packages (`cvenv add numpy`); use `--pypi` only for packages not on conda-forge.
 GPU builds of PyTorch etc. need a CUDA system requirement in the manifest: create the env with
@@ -114,7 +122,14 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
   command. Each *command start* costs ~0.4–0.6 s (container launch) — avoid host-side loops that
   start `python` thousands of times; loop inside Python or `cvenv run --env NAME bash script.sh`.
 - **Host-only tools are not available inside the container** (e.g. `sbatch`, `squeue`, `module`).
-  Call them from the host shell, not from Python running in the env.
+  Call them from the host shell, not from Python running in the env. (squashfuse envs run on the
+  host, so these do work there.)
+- **squashfuse envs:** command start ~20 ms once mounted. All host paths are visible (no binds).
+  `sys.executable` is the real interpreter under the mount point; it only exists on nodes where
+  the env is mounted, so to start a process on another node use the shim path
+  `<env>/.cvenv/bin/python` (it mounts first). Mounts unmount themselves when unused. Never
+  delete or rename anything under the mount root (`<store>/.cvenv-mnt/`) by hand: cvenv removes
+  old mount points itself, after a retention period.
 - **Env kinds** (`cvenv envs` KIND column): `pixi` (manifest-based; add/remove/rebuild), `wrap`
   (existing image; `rebuild` re-pulls it), `wrap-install` (squashed existing tree mounted at its
   original path; `add`/`remove` don't apply). `cvenv list --env NAME` shows packages (pixi) or
@@ -130,7 +145,9 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
 ```
 <env>/pixi.toml            # edit via cvenv add/remove or by hand (plain pixi manifest)
 <env>/pixi.lock            # written by builds; describes exactly what is in the image
-<env>/.cvenv/image.sif     # the environment (do not modify)
+<env>/.cvenv/image.sif     # the environment, apptainer backend (do not modify)
+<env>/.cvenv/image-*.sqfs  # the environment, squashfuse backend
+<store>/.cvenv-mnt/        # squashfuse mount points (empty directories; managed by cvenv)
 <env>/.cvenv/bin/          # shims (python, ...): symlinks to the cvenv binary
 <env>/.cvenv/build.log     # last local build log; build-<jobid>.log for Slurm builds
 <env>/.cvenv/packages.txt  # `pixi list` of the image
@@ -139,13 +156,15 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
 
 Optional per-env settings live in the manifest under `[tool.cvenv]`: `base-image`,
 `post-commands` (both require rebuild), `gpu = "auto"|true|false|"rocm"`, `binds`, `env = {K = "V"}`,
-`apptainer-args`, `shim-exclude`, `shim-include`, `isolate-user-site`.
+`apptainer-args`, `shim-exclude`, `shim-include`, `isolate-user-site` (`gpu`, `binds`,
+`apptainer-args` only matter for the apptainer backend).
 
 ## Settings
 
 `cvenv config` lists them with their source. Relevant keys: `store` (where `init` creates envs),
 `rebuild-mode` (`local`|`slurm` default for `rebuild`), `slurm-args` (sbatch args, e.g. account and
-partition), `build-tmpdir` (node-local scratch for builds). Change with
+partition), `build-tmpdir` (node-local scratch for builds), `backend` (`auto`|`apptainer`|`squashfuse`),
+`mount-timeout`, `mount-mode`, `mount-root`, `mount-retention` (squashfuse mounts). Change with
 `cvenv config set KEY VALUE`. Ask the user before changing global settings.
 
 ## Troubleshooting
@@ -164,4 +183,7 @@ partition), `build-tmpdir` (node-local scratch for builds). Change with
 | `pip install` refused | expected; use `cvenv add --pypi PKG` + rebuild |
 | file not found inside container | path not bound: `CVENV_BINDS=/that/path cvenv run --env NAME ...` |
 | `apptainer not found` | `cvenv config set apptainer /path/to/apptainer` (or load the site module) |
-| debug the container invocation | `CVENV_DEBUG=1 cvenv run --env NAME ...` prints the apptainer command |
+| debug the container invocation | `CVENV_DEBUG=1 cvenv run --env NAME ...` prints the apptainer command (or the squashfuse mount + exec) |
+| `squashfuse not found` | `cvenv config set squashfuse /path/to/squashfuse_ll`, or re-run installation.sh |
+| `is mounted by another user on this node` | a shared squashfuse env is in use by someone else on this node; use another node or wait |
+| `Transport endpoint is not connected` | a stale squashfuse mount; cvenv repairs it on the next command. If a running process hit it, rerun it |

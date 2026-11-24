@@ -1,7 +1,7 @@
 //! Running commands inside an env's image: tool discovery, binds, GPUs, shims, activation.
 
 use crate::config::{self, exe_path};
-use crate::env::{Env, Kind, SHIM_LINK};
+use crate::env::{Backend, Env, Kind, SHIM_LINK};
 use crate::util::{expand, is_executable, is_under, q, qp, realpath, warn, which, write_atomic};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -63,6 +63,45 @@ pub fn find_apptainer() -> Result<PathBuf> {
     bail!(
         "apptainer not found. Load it (e.g. `module load apptainer`) or run \
          `cvenv config set apptainer /path/to/apptainer` (installation.sh does this)"
+    )
+}
+
+/// The backend a build uses: `--backend` > `backend` setting > the env's current backend >
+/// auto-detection (Apptainer if installed, otherwise squashfuse).
+pub fn select_backend(env: Option<&Env>, requested: Option<Backend>, kind: Kind) -> Result<Backend> {
+    if kind == Kind::Wrap {
+        if requested == Some(Backend::Squashfuse) {
+            bail!("`cvenv wrap` runs existing container images and needs Apptainer; the squashfuse backend can't run them");
+        }
+        return Ok(Backend::Apptainer);
+    }
+    if let Some(b) = requested {
+        return Ok(b);
+    }
+    if let Some(v) = config::value("backend") {
+        match v.trim().to_lowercase().as_str() {
+            "" | "auto" => {}
+            other => {
+                return Backend::parse(other)
+                    .ok_or_else(|| anyhow::anyhow!("invalid `backend` setting '{}' (auto, apptainer or squashfuse)", other))
+            }
+        }
+    }
+    if let Some(e) = env {
+        if e.built() {
+            return Ok(e.backend());
+        }
+    }
+    if find_apptainer().is_ok() {
+        return Ok(Backend::Apptainer);
+    }
+    if crate::squash::find_squashfuse().is_ok() {
+        return Ok(Backend::Squashfuse);
+    }
+    bail!(
+        "neither apptainer nor squashfuse was found. Install one of them (installation.sh can fetch \
+         squashfuse on Debian/Ubuntu), or point cvenv at it: `cvenv config set apptainer PATH` / \
+         `cvenv config set squashfuse PATH`"
     )
 }
 
@@ -308,10 +347,14 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     Ok(ContainerCmd { argv, env: penv })
 }
 
-/// Replace the current process with `apptainer <mode> ... image args`.
+/// Replace the current process with the command running in the env: `apptainer <mode>
+/// ... image args`, or (squashfuse backend) the command itself from the mounted image.
 pub fn exec_in_container(env: &Env, args: &[String], mode: &str) -> Result<()> {
     if !env.built() {
         bail!("env '{}' has not been built yet - run `{}`", env.name, env.rebuild_hint());
+    }
+    if env.backend() == Backend::Squashfuse {
+        return crate::squash::exec(env, args, mode);
     }
     let cc = container_command(env, args, mode)?;
     if std::env::var_os("CVENV_DEBUG").is_some() {

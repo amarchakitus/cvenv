@@ -5,8 +5,8 @@
 
 use crate::build::{build_tmp_root, parse_base_image};
 use crate::config;
-use crate::env::{load_registry, update_registry, valid_name, Env, Kind, Meta, Record, WRAP_CFG};
-use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_layer, write_shims, HOST_ENV_DROP, INSTALL_SQFS};
+use crate::env::{load_registry, update_registry, valid_name, Backend, Env, Kind, Meta, Record, WRAP_CFG};
+use crate::runtime::{find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims, HOST_ENV_DROP, INSTALL_SQFS};
 use crate::util::{expand, human_size, info, is_executable, is_under, lock_file, now_iso, realpath, remove_tree, warn, which, write_atomic, write_json};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -268,7 +268,7 @@ pub fn refresh_wrap(env: &Env) -> Result<()> {
 // cvenv wrap-install
 // ---------------------------------------------------------------------------
 
-fn find_mksquashfs() -> Result<PathBuf> {
+pub fn find_mksquashfs() -> Result<PathBuf> {
     if let Some(p) = which("mksquashfs") {
         return Ok(p);
     }
@@ -336,6 +336,7 @@ pub struct InstallOpts {
     pub base_image: Option<String>,
     pub bin_dirs: Vec<String>,
     pub replace: bool,
+    pub backend: Option<Backend>,
 }
 
 pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: InstallOpts) -> Result<()> {
@@ -364,6 +365,10 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
         fs::write(&cfg_file, WRAP_CFG_TEMPLATE)?;
     }
     let env = Env::new(name, &Record { path: dir.clone(), manifest: cfg_file, kind: Kind::WrapInstall, pixi_env: "default".into(), created: None });
+    let backend = select_backend(None, opts.backend, Kind::WrapInstall)?;
+    if backend == Backend::Squashfuse && opts.base_image.is_some() {
+        warn("--base-image is ignored by the squashfuse backend (the tree runs on the host OS)");
+    }
     let base = match &opts.base_image {
         Some(b) => b.clone(),
         None => config::value("base-image").unwrap_or_else(|| {
@@ -371,7 +376,7 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
             format!("docker://ghcr.io/prefix-dev/pixi:{}", ver)
         }),
     };
-    if let Err(e) = install_image(&env, &tree, &base, &bin_dirs) {
+    if let Err(e) = install_image(&env, &tree, &base, &bin_dirs, backend) {
         warn(&format!("wrap-install failed; nothing was registered ({} can be removed)", dir.display()));
         return Err(e);
     }
@@ -390,32 +395,43 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
     Ok(())
 }
 
-fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String]) -> Result<()> {
+fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String], backend: Backend) -> Result<()> {
     let _lock = lock_file(&env.art().join(".build.lock"), false, &format!("env '{}'", env.name))?;
     let t0 = Instant::now();
-    let (kind, _) = parse_base_image(base);
-    let base_ref = if kind == "localimage" { base.to_string() } else if base.contains("://") { base.to_string() } else { format!("docker://{}", base) };
-    fetch_image(&base_ref, &env.image(), false)?;
+    let sif = env.art().join(crate::env::IMAGE_NAME);
+    if backend == Backend::Apptainer {
+        let (kind, _) = parse_base_image(base);
+        let base_ref = if kind == "localimage" { base.to_string() } else if base.contains("://") { base.to_string() } else { format!("docker://{}", base) };
+        fetch_image(&base_ref, &sif, false)?;
+    }
     squash(tree, &env.art().join(INSTALL_SQFS))?;
     let exec_paths = list_host_bins(tree, bin_dirs);
     if exec_paths.is_empty() {
         warn("no executables found to expose; use --bin-dir DIR (relative to the tree)");
     }
     let bins: Vec<String> = exec_paths.keys().cloned().collect();
-    let size = fs::metadata(env.image())?.len() + fs::metadata(env.art().join(INSTALL_SQFS))?.len();
+    let sqfs_size = fs::metadata(env.art().join(INSTALL_SQFS))?.len();
+    let (size, files, apptainer, base) = if backend == Backend::Apptainer {
+        (fs::metadata(&sif)?.len() + sqfs_size, 2, find_apptainer()?.display().to_string(), base.to_string())
+    } else {
+        // switched from apptainer: the base image is not needed any more
+        let _ = fs::remove_file(&sif);
+        (sqfs_size, 1, String::new(), "none (runs on the host OS)".to_string())
+    };
     let meta = Meta {
         kind: Kind::WrapInstall,
+        backend,
         name: env.name.clone(),
         manifest: env.manifest.clone(),
         pixi_env: env.pixi_env.clone(),
         built_at: now_iso(),
         build_seconds: (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0,
-        base_image: base.to_string(),
+        base_image: base,
         source: Some(tree.display().to_string()),
         install_path: Some(tree.to_path_buf()),
         bin_dirs: bin_dirs.to_vec(),
         conda: tree.join("conda-meta").is_dir(),
-        apptainer: find_apptainer()?.display().to_string(),
+        apptainer,
         cvenv_version: env!("CARGO_PKG_VERSION").into(),
         image_size: size,
         bins: bins.clone(),
@@ -425,10 +441,13 @@ fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String]) -> Res
     write_json(&env.meta_path(), &meta)?;
     let n = write_shims(env, &bins)?;
     info(&format!(
-        "wrapped {} as '{}' ({} in 2 files, {} commands exposed: {})",
+        "wrapped {} as '{}' ({} in {} file{}, {} backend, {} commands exposed: {})",
         tree.display(),
         env.name,
         human_size(size),
+        files,
+        if files == 1 { "" } else { "s" },
+        backend.label(),
         n,
         preview(&exposed(env, &bins))
     ));
@@ -491,7 +510,7 @@ pub fn relink_stub(env: &Env) {
 }
 
 /// `cvenv rebuild` for a wrap-install env: re-squash the tree (if it still exists).
-pub fn refresh_install(env: &Env) -> Result<()> {
+pub fn refresh_install(env: &Env, backend: Option<Backend>) -> Result<()> {
     let meta = env.meta().ok_or_else(|| anyhow::anyhow!("no metadata for env '{}'", env.name))?;
     let tree = meta.install_path.clone().ok_or_else(|| anyhow::anyhow!("env '{}' has no recorded tree", env.name))?;
     if tree.join(STUB_MARKER).exists() || !tree.is_dir() {
@@ -501,7 +520,16 @@ pub fn refresh_install(env: &Env) -> Result<()> {
             env.name
         );
     }
+    let backend = select_backend(Some(env), backend, Kind::WrapInstall)?;
+    let base = if meta.backend == Backend::Apptainer {
+        meta.base_image.clone()
+    } else {
+        config::value("base-image").unwrap_or_else(|| {
+            let ver = find_pixi().ok().and_then(|p| pixi_version(&p)).unwrap_or_else(|| "latest".into());
+            format!("docker://ghcr.io/prefix-dev/pixi:{}", ver)
+        })
+    };
     info(&format!("re-squashing {} for '{}'", tree.display(), env.name));
-    install_image(env, &tree, &meta.base_image, &meta.bin_dirs)?;
+    install_image(env, &tree, &base, &meta.bin_dirs, backend)?;
     env.write_env_file()
 }

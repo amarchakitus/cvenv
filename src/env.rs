@@ -60,6 +60,35 @@ impl Kind {
     }
 }
 
+/// How an env's image is stored and run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Backend {
+    /// a .sif image; commands run inside an Apptainer container
+    #[default]
+    Apptainer,
+    /// a SquashFS image mounted with squashfuse (no root, no Apptainer); commands run on
+    /// the host from the mount point
+    Squashfuse,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Apptainer => "apptainer",
+            Backend::Squashfuse => "squashfuse",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Backend> {
+        match s.trim().to_lowercase().as_str() {
+            "apptainer" | "singularity" | "sif" => Some(Backend::Apptainer),
+            "squashfuse" | "squashfs" | "sqfs" => Some(Backend::Squashfuse),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Record {
     pub path: PathBuf,
@@ -111,6 +140,8 @@ pub struct StatSig {
 #[serde(default)]
 pub struct Meta {
     pub kind: Kind,
+    /// absent in metadata written before backends existed (= apptainer)
+    pub backend: Backend,
     pub name: String,
     pub pixi_env: String,
     pub manifest: PathBuf,
@@ -142,6 +173,14 @@ pub struct Meta {
     pub commands: Vec<String>,
     /// wrap: image.sif is a symlink to the source image
     pub link: bool,
+    /// squashfuse: image file name in `.cvenv/` (`image-<build-id>.sqfs`)
+    pub squash_image: Option<String>,
+    /// squashfuse: where the image is mounted (= the directory pixi installed into)
+    pub mount_dir: Option<PathBuf>,
+    /// squashfuse: variables set by the pixi activation (PATH excluded)
+    pub activation: BTreeMap<String, String>,
+    /// squashfuse: directories the activation puts in front of PATH
+    pub path_prepend: Vec<String>,
 }
 
 /// `<env>/.cvenv/env.json`
@@ -154,6 +193,9 @@ pub struct EnvFile {
     pub manifest: PathBuf,
     #[serde(default = "default_pixi_env")]
     pub pixi_env: String,
+    /// permanent id (survives `cvenv move`); names the env's squashfuse mount directory
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 pub struct Env {
@@ -207,8 +249,26 @@ impl Env {
     /// Write `.cvenv/env.json` (best effort: shared envs may not be writable by us).
     pub fn write_env_file(&self) -> Result<()> {
         let manifest = self.manifest.strip_prefix(&self.path).map(Path::to_path_buf).unwrap_or_else(|_| self.manifest.clone());
-        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone() };
+        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone(), id: self.env_id() };
         write_json(&self.art().join(ENV_FILE), &ef)
+    }
+
+    /// The env's permanent id, if it has one (see `ensure_env_id`).
+    pub fn env_id(&self) -> Option<String> {
+        read_json::<EnvFile>(&self.art().join(ENV_FILE)).and_then(|f| f.id).filter(|i| valid_name(i))
+    }
+
+    /// The env's permanent id, created (and saved in env.json) on first use.
+    pub fn ensure_env_id(&self) -> Result<String> {
+        if let Some(id) = self.env_id() {
+            return Ok(id);
+        }
+        let seed = format!("{}|{}|{}|{:?}", self.path.display(), crate::util::now_iso(), std::process::id(), std::time::SystemTime::now());
+        let id = sha256_bytes(seed.as_bytes())[..16].to_string();
+        let manifest = self.manifest.strip_prefix(&self.path).map(Path::to_path_buf).unwrap_or_else(|_| self.manifest.clone());
+        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone(), id: Some(id.clone()) };
+        write_json(&self.art().join(ENV_FILE), &ef)?;
+        Ok(id)
     }
 
     pub fn is_pixi(&self) -> bool {
@@ -227,8 +287,21 @@ impl Env {
     pub fn art(&self) -> PathBuf {
         self.path.join(ART_DIR)
     }
+    /// The backend of the current image (apptainer when there is none yet).
+    pub fn backend(&self) -> Backend {
+        self.meta().map(|m| m.backend).unwrap_or_default()
+    }
+    /// The file whose presence means "built": the .sif (apptainer), the SquashFS image
+    /// (squashfuse) or the squashed tree (squashfuse wrap-install).
     pub fn image(&self) -> PathBuf {
-        self.art().join(IMAGE_NAME)
+        let meta = self.meta();
+        match meta.as_ref().map(|m| m.backend).unwrap_or_default() {
+            Backend::Apptainer => self.art().join(IMAGE_NAME),
+            Backend::Squashfuse => match self.kind {
+                Kind::WrapInstall => self.art().join(crate::runtime::INSTALL_SQFS),
+                _ => self.art().join(meta.and_then(|m| m.squash_image).unwrap_or_else(|| "image.sqfs".into())),
+            },
+        }
     }
     pub fn meta_path(&self) -> PathBuf {
         self.art().join(META_NAME)
