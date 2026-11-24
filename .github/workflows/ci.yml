@@ -27,6 +27,14 @@ jobs:
         with:
           pixi-version: v0.84.2   # the version that wrote pixi.lock
           cache: true
+          activate-environment: true   # so rust-cache keys on pixi's rustc
+      - name: Keep cargo state where rust-cache looks for it
+        run: |
+          echo "CVENV_CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "CVENV_CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: rustfmt + clippy
         run: pixi run lint
       - name: shellcheck   # preinstalled on GitHub's Ubuntu runners
@@ -49,6 +57,14 @@ jobs:
         with:
           pixi-version: v0.84.2   # the version that wrote pixi.lock
           cache: true
+          activate-environment: true   # so rust-cache keys on pixi's rustc
+      - name: Keep cargo state where rust-cache looks for it
+        run: |
+          echo "CVENV_CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "CVENV_CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pixi run test
       - name: Build (static, same script as `pixi run build`)
         run: pixi run build
