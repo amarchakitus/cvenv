@@ -1,0 +1,23 @@
+# Weekly dependency update PRs (security fixes are opened as soon as an advisory appears).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # one PR for all compatible (minor/patch) crate updates
+      cargo-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

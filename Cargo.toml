@@ -3,6 +3,7 @@ name = "cvenv"
 version = "0.4.1"
 edition = "2021"
 description = "pixi environments packed into single-file images (Apptainer or squashfuse)"
+license = "Apache-2.0"
 rust-version = "1.87"
 
 [dependencies]
