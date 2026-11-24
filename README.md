@@ -140,3 +140,7 @@ pixi run test
 
 Pushing a `v*` tag publishes static x86_64 and aarch64 binaries through
 `.github/workflows/release.yml`.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
