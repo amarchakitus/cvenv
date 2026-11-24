@@ -52,7 +52,7 @@ For a GPU env, declare the CUDA version: `cvenv init gpuenv --cuda 12.0 python=3
 | `cvenv init NAME --manifest PATH` | Registers an existing `pixi.toml` or `pyproject.toml` |
 | `cvenv wrap NAME IMAGE` | Uses an existing container: `.sif`, `docker://…`, `oras://…` |
 | `cvenv wrap-install NAME DIR` | Packs an existing installation, such as a conda env, into one file |
-| `cvenv activate [NAME]`, `cvenv deactivate` | Puts the env's commands on `PATH`, or remove them |
+| `cvenv activate [NAME]`, `cvenv deactivate` | Puts the env's commands on `PATH`, or removes them |
 | `cvenv add …`, `cvenv remove …` | Changes dependencies (pixi syntax); takes effect on rebuild |
 | `cvenv rebuild` | Builds the image (`--slurm`, `--incremental`, `--update`, `--backend`) |
 | `cvenv run CMD…` | Runs a command or pixi task in the env |
@@ -61,7 +61,7 @@ For a GPU env, declare the CUDA version: `cvenv init gpuenv --cuda 12.0 python=3
 | `cvenv info`, `cvenv list [PATTERN]` | Shows env details, or installed packages |
 | `cvenv task …` | Manages pixi tasks |
 | `cvenv move NAME DEST` | Moves an env to another directory |
-| `cvenv share NAME`, `cvenv register PATH` | Shares an env with your group, or add a shared one |
+| `cvenv share NAME`, `cvenv register PATH` | Shares an env with your group, or adds a shared one |
 | `cvenv unregister NAME [--delete]` | Forgets an env, optionally deleting its files |
 | `cvenv config [get\|set\|unset KEY [VALUE]]` | Shows or changes settings |
 
