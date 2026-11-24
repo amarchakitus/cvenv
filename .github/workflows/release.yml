@@ -20,7 +20,7 @@ jobs:
             triple: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
           pixi-version: v0.84.2   # the version that wrote pixi.lock
@@ -37,7 +37,7 @@ jobs:
           mkdir -p dist
           cp bin/cvenv dist/cvenv-${{ matrix.triple }}
           (cd dist && sha256sum cvenv-${{ matrix.triple }} > cvenv-${{ matrix.triple }}.sha256)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cvenv-${{ matrix.triple }}
           path: dist/*
@@ -47,11 +47,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
