@@ -674,10 +674,8 @@ pub fn build(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool, i
             }
             c
         };
-        if update {
-            if !run_logged(&mut pixi_cmd(&["update", "--manifest-path", &manifest]), &mut log)?.success() {
-                bail!("`pixi update` failed");
-            }
+        if update && !run_logged(&mut pixi_cmd(&["update", "--manifest-path", &manifest]), &mut log)?.success() {
+            bail!("`pixi update` failed");
         }
         if !run_logged(&mut pixi_cmd(&["install", "--manifest-path", &manifest, "-e", &env.pixi_env]), &mut log)?.success() {
             bail!("`pixi install` failed");

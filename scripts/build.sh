@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build cvenv and install the binary to bin/cvenv. Run via `pixi run build`.
+# `pixi run test` / `lint` / `fmt` pass --test / --lint / --fmt instead.
 # Cargo's registry cache and target dir hold thousands of files: keep them on
 # node-local scratch instead of the repo / $HOME.
 set -euo pipefail
@@ -16,9 +17,13 @@ locked=""; [ -f Cargo.lock ] && locked="--locked"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static -C relocation-model=static"
 unset LDFLAGS
-if [ "${1:-}" = "--test" ]; then
-    exec cargo test $locked --target "$TRIPLE"
-fi
+case "${1:-}" in
+    --test) exec cargo test $locked --target "$TRIPLE" ;;
+    --lint)
+        cargo fmt --check
+        exec cargo clippy $locked --target "$TRIPLE" --all-targets -- -D warnings ;;
+    --fmt) exec cargo fmt ;;
+esac
 cargo build --release $locked --target "$TRIPLE"
 install -m 755 "$CARGO_TARGET_DIR/$TRIPLE/release/cvenv" "$REPO/bin/cvenv.new"
 mv -f "$REPO/bin/cvenv.new" "$REPO/bin/cvenv"

@@ -1016,35 +1016,6 @@ fn cmd_shell(argv: &[String]) -> Result<()> {
     exec_in_container(&e, &rest, "shell")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
-
-    #[test]
-    fn env_option_parsing() {
-        let (n, r) = split_env_opt(&s(&["--pypi", "--env", "foo", "requests"]), false).unwrap();
-        assert_eq!(n.as_deref(), Some("foo"));
-        assert_eq!(r, s(&["--pypi", "requests"]));
-        // for `run`, options after the command belong to the command
-        let (n, r) = split_env_opt(&s(&["-n", "foo", "python", "--env", "x"]), true).unwrap();
-        assert_eq!(n.as_deref(), Some("foo"));
-        assert_eq!(r, s(&["python", "--env", "x"]));
-        let (n, r) = split_env_opt(&s(&["--env=bar", "--", "-c", "1"]), true).unwrap();
-        assert_eq!(n.as_deref(), Some("bar"));
-        assert_eq!(r, s(&["-c", "1"]));
-    }
-
-    #[test]
-    fn pip_detection() {
-        assert!(is_pip("pip") && is_pip("pip3") && is_pip("pip3.12"));
-        assert!(!is_pip("pipx") && !is_pip("pip3.x"));
-    }
-}
-
 fn require_pixi(e: &Env, verb: &str) -> Result<()> {
     if !e.is_pixi() {
         bail!(
@@ -1272,4 +1243,33 @@ fn import_requirements(manifest: &Path, file: &Path, python: &str) -> Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn env_option_parsing() {
+        let (n, r) = split_env_opt(&s(&["--pypi", "--env", "foo", "requests"]), false).unwrap();
+        assert_eq!(n.as_deref(), Some("foo"));
+        assert_eq!(r, s(&["--pypi", "requests"]));
+        // for `run`, options after the command belong to the command
+        let (n, r) = split_env_opt(&s(&["-n", "foo", "python", "--env", "x"]), true).unwrap();
+        assert_eq!(n.as_deref(), Some("foo"));
+        assert_eq!(r, s(&["python", "--env", "x"]));
+        let (n, r) = split_env_opt(&s(&["--env=bar", "--", "-c", "1"]), true).unwrap();
+        assert_eq!(n.as_deref(), Some("bar"));
+        assert_eq!(r, s(&["-c", "1"]));
+    }
+
+    #[test]
+    fn pip_detection() {
+        assert!(is_pip("pip") && is_pip("pip3") && is_pip("pip3.12"));
+        assert!(!is_pip("pipx") && !is_pip("pip3.x"));
+    }
 }
