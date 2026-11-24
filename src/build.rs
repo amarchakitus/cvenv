@@ -259,7 +259,7 @@ pub fn build_env(
     if !env.manifest.is_file() {
         bail!("manifest not found: {}", env.manifest.display());
     }
-    fs::create_dir_all(env.art())?;
+    env.ensure_art()?;
     let _lock = lock_file(
         &env.art().join(".build.lock"),
         false,
@@ -510,7 +510,7 @@ pub fn submit_slurm(
     if is_building(env) {
         bail!("env '{}' is already being built", env.name);
     }
-    fs::create_dir_all(env.art())?;
+    env.ensure_art()?;
     let exe = crate::config::exe_path();
     let mut cmd_line = format!("{} rebuild --local --env {}", qp(&exe), q(&env.name));
     if update {

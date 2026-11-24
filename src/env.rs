@@ -346,6 +346,10 @@ impl Env {
     pub fn art(&self) -> PathBuf {
         self.path.join(ART_DIR)
     }
+    /// Create `.cvenv/` (see `ensure_art_dir`).
+    pub fn ensure_art(&self) -> Result<PathBuf> {
+        ensure_art_dir(&self.path)
+    }
     /// The backend of the current image (apptainer when there is none yet).
     pub fn backend(&self) -> Backend {
         self.meta().map(|m| m.backend).unwrap_or_default()
@@ -476,6 +480,22 @@ pub fn toml_to_string(v: &toml::Value) -> String {
         toml::Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// Create `<dir>/.cvenv/` with a `.gitignore` of `*`, so images, shims and logs stay out
+/// of git without touching the project's own .gitignore (like uv's `.venv`).
+pub fn ensure_art_dir(dir: &Path) -> Result<PathBuf> {
+    let art = dir.join(ART_DIR);
+    fs::create_dir_all(&art).with_context(|| format!("creating {}", art.display()))?;
+    let gi = art.join(".gitignore");
+    if !gi.exists() {
+        // best effort: shared envs may not be writable by us
+        let _ = fs::write(
+            &gi,
+            "# created by cvenv: keep images, shims and logs out of git\n*\n",
+        );
+    }
+    Ok(art)
 }
 
 pub fn valid_name(n: &str) -> bool {

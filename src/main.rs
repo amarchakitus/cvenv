@@ -617,23 +617,8 @@ fn cmd_init(
         warn("--cuda only applies to newly created manifests; add [system-requirements] by hand");
     }
 
-    // keep images/shims out of git (only relevant when the workspace holds .cvenv/)
-    let gi = manifest.parent().unwrap_or(&path).join(".gitignore");
-    let existing = fs::read_to_string(&gi).unwrap_or_default();
-    if is_under(&manifest, &path) && !existing.split_whitespace().any(|l| l == ".cvenv/") {
-        let sep = if existing.is_empty() || existing.ends_with('\n') {
-            ""
-        } else {
-            "\n"
-        };
-        let _ = fs::write(
-            &gi,
-            format!(
-                "{}{}# cvenv images, shims and logs\n.cvenv/\n",
-                existing, sep
-            ),
-        );
-    }
+    // `.cvenv/` ignores itself in git (see ensure_art_dir)
+    env::ensure_art_dir(&path)?;
 
     let rec = Record {
         path: path.clone(),

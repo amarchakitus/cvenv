@@ -824,7 +824,7 @@ pub fn build(
     if !env.manifest.is_file() {
         bail!("manifest not found: {}", env.manifest.display());
     }
-    fs::create_dir_all(env.art())?;
+    env.ensure_art()?;
     let _lock = lock_file(
         &env.art().join(".build.lock"),
         false,
