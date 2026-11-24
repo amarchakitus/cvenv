@@ -126,11 +126,13 @@ ask_yn() {  # ask_yn "Question" y|n -> returns 0 for yes
 
 expand_path() {  # ~ and relative paths -> absolute
     local p="$1"
+    # shellcheck disable=SC2088  # matching a literal "~" typed by the user
     case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#\~/}" ;; esac
     case "$p" in /*|"") ;; *) p="$PWD/$p" ;; esac
     printf '%s' "$p"
 }
 
+# shellcheck disable=SC2088  # printing a literal "~" for display
 tildify() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 
 fetch() {  # fetch URL DEST
@@ -160,6 +162,7 @@ PREFIX="$(expand_path "${F_PREFIX:-$([ "$IN_CHECKOUT" = 1 ] && echo "$SRC_DIR" |
 conf_get() {  # value from an existing <prefix>/etc/install.conf
     local f="$PREFIX/etc/install.conf"
     [ -f "$f" ] || return 0
+    # shellcheck disable=SC1090  # install.conf path is only known at runtime
     ( set +u; . "$f" >/dev/null 2>&1; eval "printf '%s' \"\${$1:-}\"" )
 }
 
@@ -336,6 +339,7 @@ if [ "$INSTALL_SQFS" = 1 ]; then
     for p in $(apt-cache depends squashfuse 2>/dev/null | awk '/Depends:/ {print $2}' | tr -d '<>' | sort -u); do
         dpkg -s "$p" >/dev/null 2>&1 || sq_pkgs="$sq_pkgs $p"
     done
+    # shellcheck disable=SC2086  # $sq_pkgs is a space-separated package list
     ( cd "$sq_tmp" && apt-get download $sq_pkgs >/dev/null 2>&1 ) || { rm -rf "$sq_tmp"; fail "apt-get download $sq_pkgs failed"; }
     rm -rf "$SQ_DIR"; mkdir -p "$SQ_DIR"
     for f in "$sq_tmp"/*.deb; do dpkg-deb -x "$f" "$SQ_DIR"; done
