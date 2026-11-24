@@ -1,23 +1,25 @@
-//! cvenv - pixi environments packed into single-file Apptainer images.
+//! cvenv - pixi environments packed into single-file images.
 //!
 //! Every env is an ordinary pixi workspace (pixi.toml + pixi.lock). Instead of
 //! materialising the environment on the shared filesystem (tens of thousands of
-//! files), `cvenv rebuild` installs it inside an Apptainer image (one .sif file).
+//! files), `cvenv rebuild` installs it into one image file: an Apptainer image (.sif),
+//! or - where Apptainer is unavailable - a SquashFS image mounted with squashfuse.
 //! Activation puts a directory of shims (python, jupyter, ...) on PATH; each shim
-//! runs the command inside the container with the host environment, working
-//! directory, bind mounts and GPUs passed through. The shims are symlinks to this
-//! binary, which dispatches on argv[0].
+//! runs the command from the image (inside the container, or from the mount point)
+//! with the host environment and working directory passed through. The shims are
+//! symlinks to this binary, which dispatches on argv[0].
 
 mod build;
 mod config;
 mod env;
 mod runtime;
+mod squash;
 mod util;
 mod wrap;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Env, Kind, Record, SHIM_LINK};
+use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Backend, Env, Kind, Record, SHIM_LINK};
 use runtime::{exec_in_container, find_pixi, gpu_flags, IMG_PIXI};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +31,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AGENT_GUIDE: &str = include_str!("../docs/AGENTS.md");
 
 const HELP: &str = "\
-cvenv - pixi environments in single-file Apptainer images
+cvenv - pixi environments in single-file images (Apptainer or squashfuse)
 
 Environment management
   init NAME [--path DIR] [--manifest FILE] [--import FILE] [-c CH] [--cuda VER] [PKG...]
@@ -37,7 +39,7 @@ Environment management
                           --import takes an environment.yml or requirements.txt
   wrap NAME IMAGE [--link] [--bin-dir DIR] [--command CMD]
                           use an existing container (file.sif, docker://, oras://...)
-  wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace]
+  wrap-install NAME DIR [--base-image IMG] [--bin-dir REL] [--replace] [--backend B]
                           squash an existing installation (e.g. a conda env) into
                           one file, mounted back at its original path
   register PATH [--name NAME]
@@ -50,7 +52,7 @@ Environment management
   unregister NAME [--delete [--yes]]
                           forget an env (optionally deleting its files)
   config [list|get|set|unset] [KEY] [VALUE]
-                          settings (store, apptainer, pixi, build-tmpdir, ...)
+                          settings (store, backend, apptainer, pixi, build-tmpdir, ...)
 
 Working with an env (uses the active env unless --env NAME|PATH is given)
   activate [NAME]         put the env's commands on PATH in this shell
@@ -58,12 +60,13 @@ Working with an env (uses the active env unless --env NAME|PATH is given)
   add [pixi add args]     add dependencies to the manifest (no build)
   remove [pixi remove args]
                           remove dependencies from the manifest (no build)
-  rebuild [--update] [--no-cache] [--incremental] [--slurm [--wait] [--slurm-args ARGS] | --local]
+  rebuild [--update] [--no-cache] [--incremental] [--backend B] [--slurm [--wait] [--slurm-args ARGS] | --local]
                           (re)build the image from the manifest (here or as a Slurm job);
-                          --incremental reuses the current image, installing only changes
+                          --incremental reuses the current image, installing only changes;
+                          --backend apptainer|squashfuse picks the image type
   run CMD [ARGS...]       run a command (or pixi task) inside the env
   exec CMD [ARGS...]      like run, but never interprets CMD as a pixi task
-  shell                   interactive shell inside the container
+  shell                   interactive shell inside the env
   list [REGEX]            packages installed in the image
   task [pixi task args]   manage pixi tasks in the manifest
 
@@ -71,9 +74,17 @@ Setup
   shell-init              print shell code for ~/.bashrc:  eval \"$(cvenv shell-init)\"
   agent-guide             print the usage guide for AI agents (rules, recipes, troubleshooting)
 
+Backends: apptainer (.sif image, commands run in a container) or squashfuse (SquashFS image
+mounted without root; commands run on the host). `backend = auto` (default) uses Apptainer
+when it is installed, squashfuse otherwise.
+
 Environment variables: CVENV_GPU=auto|1|0|rocm, CVENV_BINDS=a,b:c, CVENV_APPTAINER_ARGS,
 CVENV_NO_STALE_WARNING=1, CVENV_NO_PROMPT=1, CVENV_DEBUG=1, CVENV_STORE, CVENV_CONFIG_DIR.
 ";
+
+fn parse_backend(s: &str) -> Result<Backend, String> {
+    Backend::parse(s).ok_or_else(|| format!("unknown backend '{}' (apptainer or squashfuse)", s))
+}
 
 #[derive(Parser)]
 #[command(name = "cvenv", version, disable_help_subcommand = true)]
@@ -152,6 +163,9 @@ enum Cmd {
         /// original files (old absolute paths keep working through cvenv)
         #[arg(long)]
         replace: bool,
+        /// apptainer or squashfuse (default: the `backend` setting / auto-detection)
+        #[arg(long, value_parser = parse_backend)]
+        backend: Option<Backend>,
     },
     /// Register an existing env directory (e.g. one shared by a colleague)
     Register {
@@ -204,6 +218,10 @@ enum Cmd {
         /// full build when that's not possible)
         #[arg(long)]
         incremental: bool,
+        /// apptainer or squashfuse (default: the `backend` setting, else the env's current
+        /// backend, else auto-detection)
+        #[arg(long, value_parser = parse_backend)]
+        backend: Option<Backend>,
         #[arg(long, hide = true)]
         keep_build_dir: bool,
     },
@@ -285,25 +303,25 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Cmd::Wrap { name, image, path, link, bin_dir, command } => {
             wrap::cmd_wrap(&name, &image, path, wrap::WrapOpts { link, bin_dirs: bin_dir, commands: command })
         }
-        Cmd::WrapInstall { name, dir, path, base_image, bin_dir, replace } => {
-            wrap::cmd_wrap_install(&name, &dir, path, wrap::InstallOpts { base_image, bin_dirs: bin_dir, replace })
+        Cmd::WrapInstall { name, dir, path, base_image, bin_dir, replace, backend } => {
+            wrap::cmd_wrap_install(&name, &dir, path, wrap::InstallOpts { base_image, bin_dirs: bin_dir, replace, backend })
         }
         Cmd::Register { path, name } => cmd_register(&path, name.as_deref()),
         Cmd::Share { env, world, group } => cmd_share(&env, world, group.as_deref()),
         Cmd::Envs => cmd_envs(),
         Cmd::Info { env } => cmd_info(env.as_deref()),
-        Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, incremental, keep_build_dir } => {
+        Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, incremental, backend, keep_build_dir } => {
             let e = resolve_env(env.as_deref(), true, true)?;
             let mode_slurm = config::value("rebuild-mode").map(|m| m.trim().eq_ignore_ascii_case("slurm")).unwrap_or(false);
             // inside a Slurm job (e.g. the submitted build itself) always build locally
             let in_job = std::env::var_os("SLURM_JOB_ID").is_some();
             if slurm || (mode_slurm && !local && !in_job) {
-                build::submit_slurm(&e, update, no_cache, incremental, slurm_args.as_deref(), wait)
+                build::submit_slurm(&e, update, no_cache, incremental, backend, slurm_args.as_deref(), wait)
             } else {
                 if !in_job && !local && util::which("sbatch").is_some() {
                     info("building on this node; for heavy envs use `cvenv rebuild --slurm` (or `cvenv config set rebuild-mode slurm`)");
                 }
-                build::build_env(&e, update, no_cache, keep_build_dir, incremental)
+                build::build_env(&e, update, no_cache, keep_build_dir, incremental, backend)
             }
         }
         Cmd::Activate { name } => cmd_activate(name.as_deref()),
@@ -538,13 +556,14 @@ fn cmd_envs() -> Result<()> {
         } else {
             size
         };
-        rows.push((if *n == active { "*" } else { " " }, n.clone(), e.kind.label(), status, size, e.path.display().to_string()));
+        let backend = if e.built() { e.backend().label() } else { "-" };
+        rows.push((if *n == active { "*" } else { " " }, n.clone(), e.kind.label(), backend, status, size, e.path.display().to_string()));
     }
     let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max(4);
-    let w3 = rows.iter().map(|r| r.3.len()).max().unwrap_or(6).max(6);
-    println!("  {:<w1$}  {:<12}  {:<w3$}  {:>7}  PATH", "NAME", "KIND", "STATUS", "SIZE", w1 = w1, w3 = w3);
+    let w4 = rows.iter().map(|r| r.4.len()).max().unwrap_or(6).max(6);
+    println!("  {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  PATH", "NAME", "KIND", "BACKEND", "STATUS", "SIZE", w1 = w1, w4 = w4);
     for r in rows {
-        println!("{} {:<w1$}  {:<12}  {:<w3$}  {:>7}  {}", r.0, r.1, r.2, r.3, r.4, r.5, w1 = w1, w3 = w3);
+        println!("{} {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  {}", r.0, r.1, r.2, r.3, r.4, r.5, r.6, w1 = w1, w4 = w4);
     }
     Ok(())
 }
@@ -569,20 +588,41 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
             }
         }
     }
+    let squashfuse = e.built() && e.backend() == Backend::Squashfuse;
+    if e.built() {
+        println!("backend     : {}", e.backend().label());
+    }
     println!("image       : {}{}", e.image().display(), if e.built() { "" } else { "  (not built)" });
     if e.built() {
         println!("image size  : {}", human_size(fs::metadata(e.image())?.len()));
         if let Some(m) = &meta {
             println!("built at    : {} ({}s)", m.built_at, m.build_seconds);
             println!("base image  : {}", m.base_image);
-            let hv = e.art().join(runtime::LAYER_DIR).is_dir() || e.kind == Kind::WrapInstall;
-            println!("host paths  : {}", if hv { "valid (sys.executable etc. point to paths that exist on the host)" } else { "image-internal (rebuild to enable host-valid paths)" });
+            if squashfuse {
+                match squash::mount_point(&e) {
+                    Ok(Some(mp)) => println!("mount point : {}  ({} on this node)", mp.display(), squash::state(&mp).label()),
+                    Ok(None) => println!("mount point : none (the original tree is still in place)"),
+                    Err(err) => println!("mount point : {:#}", err),
+                }
+                match squash::find_squashfuse() {
+                    Ok(p) => println!("squashfuse  : {}", p.display()),
+                    Err(_) => println!("squashfuse  : NOT FOUND - the env can't run here (`cvenv config set squashfuse PATH`)"),
+                }
+                println!("host paths  : real paths under the mount point (mounted on demand by cvenv and the shims)");
+            } else {
+                let hv = e.art().join(runtime::LAYER_DIR).is_dir() || e.kind == Kind::WrapInstall;
+                println!("host paths  : {}", if hv { "valid (sys.executable etc. point to paths that exist on the host)" } else { "image-internal (rebuild to enable host-valid paths)" });
+            }
         }
         let n = fs::read_dir(e.shim_dir()).map(|rd| rd.filter_map(|x| x.ok()).filter(|x| x.file_name() != SHIM_LINK).count()).unwrap_or(0);
         println!("commands    : {} shimmed in {}", n, e.shim_dir().display());
     }
-    let gf = gpu_flags(&e);
-    println!("gpu flags   : {}", if gf.is_empty() { "(none on this node)".to_string() } else { gf.join(" ") });
+    if squashfuse {
+        println!("gpu         : host GPUs and drivers are used directly");
+    } else {
+        let gf = gpu_flags(&e);
+        println!("gpu flags   : {}", if gf.is_empty() { "(none on this node)".to_string() } else { gf.join(" ") });
+    }
     let s = staleness(&e);
     println!("status      : {}", if s.reasons.is_empty() { "up to date" } else { "needs attention" });
     for r in s.reasons {
@@ -648,6 +688,8 @@ fn cmd_move(name: &str, dest_arg: &str) -> Result<()> {
         let _l = util::lock_file(&e.art().join(".build.lock"), false, &format!("env '{}' (a build is running)", e.name))?;
     }
     info(&format!("moving '{}': {} -> {}", e.name, e.path.display(), dest.display()));
+    // squashfuse mount points live outside the env directory (`mount-root`), so moving it
+    // never pulls a mounted directory away from a running job
     move_dir(&e.path, &dest)?;
     let old = e.path.clone();
     let mut new_rec = None;
@@ -710,6 +752,8 @@ fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
                 bail!("aborted");
             }
         }
+        // squashfuse: the mount point stays (jobs may still use it) and is removed later
+        squash::retire_image(e.meta().as_ref());
         for t in targets {
             if t.exists() {
                 remove_tree(&t);
@@ -842,6 +886,7 @@ fn cmd_add_remove(verb: &str, argv: &[String]) -> Result<()> {
     }
     let e = resolve_env(name.as_deref(), true, true)?;
     require_pixi(&e, verb)?;
+    squash::drop_pixi_envs_link(&e);
     let mut args = vec![verb.to_string(), "--manifest-path".into(), e.manifest.display().to_string(), "--frozen".into()];
     args.extend(rest);
     if !host_pixi(&args)? {
@@ -859,6 +904,7 @@ fn cmd_task(argv: &[String]) -> Result<()> {
     let (name, mut rest) = split_env_opt(argv, false)?;
     let e = resolve_env(name.as_deref(), true, true)?;
     require_pixi(&e, "task")?;
+    squash::drop_pixi_envs_link(&e);
     if rest.is_empty() {
         rest.push("list".into());
     }
@@ -911,15 +957,19 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
     }
     warn_if_stale(&e);
     if !exec_mode && e.is_pixi() && env::task_names(&e).contains(&rest[0]) {
-        let mut argv = vec![
-            IMG_PIXI.to_string(),
-            "run".into(),
-            "--frozen".into(),
+        let mut argv = if e.backend() == Backend::Squashfuse {
+            // host pixi, pointed at the mounted env; --as-is: never install into the read-only image
+            std::env::set_var("PIXI_HOME", squash::task_pixi_home(&e)?);
+            vec![find_pixi()?.display().to_string(), "run".into(), "--as-is".into()]
+        } else {
+            vec![IMG_PIXI.to_string(), "run".into(), "--frozen".into()]
+        };
+        argv.extend([
             "--manifest-path".into(),
             e.manifest.display().to_string(),
             "-e".into(),
             e.pixi_env.clone(),
-        ];
+        ]);
         argv.extend(rest);
         rest = argv;
         // pixi re-checks [system-requirements] cuda; CPU-only nodes have no __cuda
@@ -1018,6 +1068,14 @@ fn cmd_register(path: &str, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `CMD ARGS -R`-like over a tree, without entering mounts (squashfuse images mounted
+/// under `.cvenv/mnt/` or anywhere else are read-only and not part of the tree).
+fn tree_cmd(root: &Path, cmd: &[&str]) -> Result<bool> {
+    let mut c = Command::new("find");
+    c.arg(root).args(["-xdev", "(", "-path", "*/.cvenv/mnt/*", "-prune", ")", "-o", "-exec"]).args(cmd).args(["{}", "+"]);
+    Ok(c.status()?.success())
+}
+
 fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let e = resolve_env(Some(sel), false, false)?;
@@ -1032,16 +1090,52 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
         }
     }
     let mode = if world { "g+rX,o+rX" } else { "g+rX" };
+    // squashfuse: mounting needs write access to the (empty) mount point directory
+    let mut mount_points: Vec<PathBuf> = vec![];
+    if e.built() && e.backend() == Backend::Squashfuse {
+        if let Some(m) = e.meta() {
+            if e.kind == Kind::WrapInstall {
+                mount_points.extend(m.install_path);
+            } else {
+                mount_points.extend(m.mount_dir);
+            }
+        }
+    }
     for t in &targets {
+        if squash::state(t) != squash::MountState::NotMounted {
+            warn(&format!("{} is mounted on this node, so its permissions can't be changed now; re-run once it is unmounted", t.display()));
+            continue;
+        }
         if let Some(g) = group {
-            if !Command::new("chgrp").arg("-R").arg(g).arg(t).status()?.success() {
+            if !tree_cmd(t, &["chgrp", g])? {
                 bail!("chgrp -R {} {} failed", g, t.display());
             }
         }
-        if !Command::new("chmod").arg("-R").arg(mode).arg(t).status()?.success() {
+        if !tree_cmd(t, &["chmod", mode])? {
             bail!("chmod -R {} {} failed", mode, t.display());
         }
         info(&format!("{} can now read {}", who, t.display()));
+    }
+    for mp in &mount_points {
+        // the directories above the mount point (`<mount-root>/<env-id>`) must be enterable
+        if e.kind != Kind::WrapInstall {
+            for d in mp.ancestors().skip(1).take(2) {
+                let _ = Command::new("chmod").arg(if world { "g+x,o+x" } else { "g+x" }).arg(d).status();
+            }
+        }
+        let w = if world { "g+w,o+w" } else { "g+w" };
+        if squash::state(mp) == squash::MountState::NotMounted && Command::new("chmod").arg(w).arg(mp).status().map(|s| s.success()).unwrap_or(false) {
+            info(&format!("{} can now mount the image at {}", who, mp.display()));
+        } else {
+            warn(&format!("could not make {} group-writable (mounted on this node?); others can't mount the image until it is", mp.display()));
+        }
+    }
+    if !mount_points.is_empty() {
+        warn(
+            "squashfuse mounts are private to the user who made them: two users can't use this env \
+             on the same node at the same time (the second one gets an error until the first \
+             one's mount is idle and unmounted)",
+        );
     }
     // every parent directory needs the x bit for others to reach the env
     let bit = if world { 0o001 } else { 0o010 };
@@ -1060,7 +1154,7 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
             cur = d.parent();
         }
     };
-    for t in &targets {
+    for t in targets.iter().chain(mount_points.iter()) {
         check(t);
     }
     // the shims run this cvenv binary, so it must be reachable too

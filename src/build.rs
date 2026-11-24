@@ -1,15 +1,15 @@
 //! Building an env's image: definition file generation + `apptainer build`.
 
 use crate::config;
-use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Env, Kind, Meta, BUILD_CFG_KEYS};
-use crate::runtime::{find_apptainer, find_pixi, pixi_version, write_layer, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
+use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Backend, Env, Kind, Meta, BUILD_CFG_KEYS};
+use crate::runtime::{find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
 use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, sha256_bytes, username, warn, write_json};
 use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
 
 /// (Bootstrap, From) for an image reference.
@@ -170,17 +170,39 @@ fn incremental_blocker(env: &Env, base_hash: &str) -> Option<String> {
     None
 }
 
-pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool, incremental: bool) -> Result<()> {
-    match env.kind {
-        Kind::Wrap => return crate::wrap::refresh_wrap(env),
-        Kind::WrapInstall => return crate::wrap::refresh_install(env),
-        Kind::Pixi => {}
+/// Run `cmd`, copying its stdout+stderr to `log` and to our stderr.
+pub fn run_logged(cmd: &mut Command, log: &mut fs::File) -> Result<ExitStatus> {
+    let (reader, writer) = std::io::pipe()?;
+    cmd.stdin(Stdio::null()).stdout(writer.try_clone()?).stderr(writer);
+    let prog = cmd.get_program().to_string_lossy().to_string();
+    let mut child = cmd.spawn().with_context(|| format!("could not run {}", prog))?;
+    // close our copies of the pipe's write end (they live in `cmd`)
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut stderr = std::io::stderr();
+    for line in BufReader::new(reader).split(b'\n') {
+        let mut line = line?;
+        line.push(b'\n');
+        let _ = log.write_all(&line);
+        let _ = stderr.write_all(&line);
     }
+    Ok(child.wait()?)
+}
+
+pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool, incremental: bool, backend: Option<Backend>) -> Result<()> {
     if env.unregistered {
         bail!("env '{}' belongs to another user (or isn't registered); only its owner can rebuild it", env.name);
     }
+    match env.kind {
+        Kind::Wrap => return crate::wrap::refresh_wrap(env),
+        Kind::WrapInstall => return crate::wrap::refresh_install(env, backend),
+        Kind::Pixi => {}
+    }
+    if select_backend(Some(env), backend, Kind::Pixi)? == Backend::Squashfuse {
+        return crate::squash::build(env, update, fresh_cache, keep_build_dir, incremental);
+    }
     let app = find_apptainer()?;
     let pixi_host = find_pixi()?;
+    let previous = env.meta();
     if !env.manifest.is_file() {
         bail!("manifest not found: {}", env.manifest.display());
     }
@@ -251,13 +273,9 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     let mut log = fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
     writeln!(log, "# {}\n# {} {}\n\n{}\n# ---- build output ----", now_iso(), app.display(), args.join(" "), def)?;
 
-    let (reader, writer) = std::io::pipe()?;
     let mut cmd = Command::new(&app);
     cmd.args(&args)
         .current_dir(&work)
-        .stdin(Stdio::null())
-        .stdout(writer.try_clone()?)
-        .stderr(writer)
         // Apptainer unpacks the base image and runs the build in APPTAINER_TMPDIR:
         // keep those (many) files on node-local disk, never on the quota'd filesystem.
         .env("APPTAINER_TMPDIR", &work)
@@ -266,16 +284,7 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     for k in HOST_ENV_DROP {
         cmd.env_remove(k);
     }
-    let mut child = cmd.spawn().with_context(|| format!("could not run {}", app.display()))?;
-    drop(cmd); // close our copies of the pipe's write end
-    let mut stderr = std::io::stderr();
-    for line in BufReader::new(reader).split(b'\n') {
-        let mut line = line?;
-        line.push(b'\n');
-        let _ = log.write_all(&line);
-        let _ = stderr.write_all(&line);
-    }
-    let status = child.wait()?;
+    let status = run_logged(&mut cmd, &mut log)?;
     if !status.success() {
         let _ = fs::remove_file(&partial);
         if !keep_build_dir {
@@ -335,6 +344,9 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     write_layer(env, &exec_paths)?;
     env.write_env_file()?;
     let n = write_shims(env, &bins)?;
+    // switched from the squashfuse backend: drop its images, retire its mount point
+    crate::squash::remove_artifacts(env, None);
+    crate::squash::retire_image(previous.as_ref());
     if !keep_build_dir {
         remove_tree(&work);
     }
@@ -390,7 +402,7 @@ pub fn is_building(env: &Env) -> bool {
 }
 
 /// Submit `cvenv rebuild --local` for `env` as a Slurm batch job.
-pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: bool, extra: Option<&str>, wait: bool) -> Result<()> {
+pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: bool, backend: Option<Backend>, extra: Option<&str>, wait: bool) -> Result<()> {
     let sbatch = crate::util::which("sbatch").ok_or_else(|| anyhow::anyhow!("sbatch not found: Slurm builds need a Slurm cluster"))?;
     if let Some((job, state)) = slurm_build_state(env) {
         bail!("env '{}' is already being built by Slurm job {} ({})", env.name, job, state);
@@ -409,6 +421,9 @@ pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: boo
     }
     if incremental {
         cmd_line.push_str(" --incremental");
+    }
+    if let Some(b) = backend {
+        cmd_line.push_str(&format!(" --backend {}", b.label()));
     }
     let script = env.art().join("build-job.sh");
     let log = env.art().join("build-%j.log");

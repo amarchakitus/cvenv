@@ -1,13 +1,21 @@
 # cvenv
 
-Pixi environments stored as a single Apptainer image file, for clusters with file-count quotas.
-Each env is a normal pixi workspace (`pixi.toml` + `pixi.lock`); `cvenv` builds it into
-`<env>/.cvenv/image.sif` and runs commands inside it, with your env vars, working directory,
-bind mounts and GPUs passed through.
+Pixi environments stored as a single image file, for clusters with file-count quotas.
+Each env is a normal pixi workspace (`pixi.toml` + `pixi.lock`); `cvenv` builds it into one
+file under `<env>/.cvenv/` and runs commands from it, with your env vars, working directory
+and GPUs passed through. Two backends:
+
+- **apptainer**: an Apptainer image (`image.sif`); commands run inside a container.
+- **squashfuse**: a SquashFS image, mounted without root; commands run directly on the host.
+  For clusters without (working) Apptainer.
+
+`backend = auto` (the default) uses Apptainer when it is installed and squashfuse otherwise.
 
 ## Install
 
-Requires Linux and Apptainer (or Singularity).
+Requires Linux and either Apptainer (or Singularity), or FUSE (`/dev/fuse`, `fusermount3`) for
+the squashfuse backend. `installation.sh` finds squashfuse, or fetches it without root on
+Debian/Ubuntu (`apt-get download`) when neither backend is installed.
 
 ```bash
 git clone https://github.com/amarchakitus/cvenv && cd cvenv
@@ -54,7 +62,7 @@ GPU env: `cvenv init gpuenv --cuda 12.0 python=3.12 pytorch-gpu`.
 | `cvenv wrap-install NAME DIR` | squash an existing install (e.g. a conda env) into one file (`--replace`) |
 | `cvenv activate [NAME]` / `cvenv deactivate` | put the env's commands on PATH |
 | `cvenv add …` / `cvenv remove …` | change dependencies (pixi syntax, e.g. `--pypi`); no build |
-| `cvenv rebuild` | build the image (`--slurm`, `--wait`, `--incremental`, `--update`, `--local`) |
+| `cvenv rebuild` | build the image (`--slurm`, `--wait`, `--incremental`, `--update`, `--local`, `--backend`) |
 | `cvenv run CMD…` | run a command or pixi task in the env |
 | `cvenv shell` | interactive shell in the container |
 | `cvenv envs` | list envs and their status |
@@ -122,14 +130,49 @@ cvenv share myenv                                  # owner
 cvenv register /path/to/containerized_envs/myenv   # others, once; or use --env /path/...
 ```
 
+## Backends
+
+|   | apptainer | squashfuse |
+|---|---|---|
+| image | `.cvenv/image.sif` | `.cvenv/image-<build>.sqfs`, mounted at `<mount-root>/<env-id>/<build>/` |
+| needs | Apptainer | FUSE + squashfuse (no root, no user namespaces) |
+| commands run | in a container (OS from the base image) | on the host (host OS, all host paths) |
+| host commands (`sbatch`, …) | not available | available |
+| start-up cost | ~0.5 s per command | ~20 ms (first use on a node: mount, <1 s) |
+| GPUs | `--nv`/`--rocm` added automatically | host drivers used directly |
+| `wrap` (existing containers) | yes | no |
+
+Pick one per build with `cvenv rebuild --backend apptainer|squashfuse`, or set a default with
+`cvenv config set backend ...`. An env keeps its backend on later rebuilds unless told otherwise.
+
+How squashfuse envs work:
+
+- The build installs through the mount point (temporarily a symlink to node-local scratch), so the
+  env's files never touch the shared filesystem; the tree is then squashed into one file.
+- Mount points live in `mount-root` (default `<store>/.cvenv-mnt/`), one empty directory per
+  build, never inside the env directory: `cvenv move` doesn't touch them, so moved envs keep
+  working without a rebuild. A rebuilt or deleted env's old mount point is kept for
+  `mount-retention` days (default 14; jobs on other nodes may still use it), then removed if it
+  is empty and not mounted on that node. Removing or renaming a directory that is mounted on
+  another node would leave a dead mount entry there that only root can clear.
+- Shims and `cvenv run` mount the image on demand, once per node. An unused mount unmounts itself
+  after `mount-timeout` seconds (default 600); stale mounts (e.g. from killed jobs) are cleaned up.
+- Under Slurm, a job's processes are killed when it ends, which would break other jobs on that node
+  still using the mount. So if your systemd user instance runs on the node, cvenv mounts through
+  `systemd-run --user` and the mount outlives the job (`mount-mode = auto`; `direct` turns this off).
+- Mounts belong to one user: two users can't use a shared env on the same node at the same time.
+- Don't copy env directories by hand (`cp -r`): a copy shares the original's mount area. Use
+  `cvenv init NAME --manifest /path/to/pixi.toml` instead.
+- `sys.executable` and other paths point into the mount point. They work on any node where the env is
+  mounted; the shims (`.cvenv/bin/python`) mount it first, so use those when starting things elsewhere.
+
 ## Notes
 
 - Don't `pip install` into an env: use `cvenv add --pypi PKG` and `cvenv rebuild`.
 - After changing dependencies, cvenv warns until you rebuild.
-- Paths visible in the container: `$HOME`, `/tmp`, the current directory and the site's default
-  binds (e.g. `/project`, `/scratch`). Add more with `CVENV_BINDS=/a,/b` or `binds = [...]`.
-- Host commands (`sbatch`, `module`, …) aren't available inside the container.
-- Each command start costs about 0.5 s (container launch).
+- Apptainer: paths visible in the container are `$HOME`, `/tmp`, the current directory and the
+  site's default binds (e.g. `/project`, `/scratch`). Add more with `CVENV_BINDS=/a,/b` or
+  `binds = [...]`. Host commands (`sbatch`, `module`, …) aren't available inside the container.
 
 ## Settings
 
@@ -138,12 +181,17 @@ cvenv register /path/to/containerized_envs/myenv   # others, once; or use --env 
 | Key | Meaning |
 |---|---|
 | `store` | where new envs are created |
+| `backend` | `auto`, `apptainer` or `squashfuse` |
 | `rebuild-mode` | `local` or `slurm` |
 | `slurm-args` | sbatch arguments for Slurm builds |
 | `build-tmpdir` | node-local scratch for builds (default `/tmp`) |
 | `pixi-cache` | package cache for builds |
 | `base-image` | default base image |
-| `apptainer`, `pixi` | tool paths (set by the installer) |
+| `apptainer`, `squashfuse`, `pixi` | tool paths (set by the installer) |
+| `mount-timeout` | seconds before an unused squashfuse mount is unmounted (default 600) |
+| `mount-mode` | squashfuse mounts: `auto` (systemd user unit if available), `systemd` or `direct` |
+| `mount-root` | where squashfuse images are mounted (default `<store>/.cvenv-mnt`) |
+| `mount-retention` | days an old build's mount point is kept before removal (default 14) |
 
 Per-env options go in `pixi.toml` under `[tool.cvenv]`, or in `cvenv.toml` for wrapped envs:
 
@@ -161,7 +209,9 @@ host-valid-paths = true
 isolate-user-site = true
 ```
 
-Environment variables: `CVENV_GPU`, `CVENV_BINDS`, `CVENV_APPTAINER_ARGS`,
+`gpu`, `binds` and `apptainer-args` apply to the apptainer backend only.
+
+Environment variables: `CVENV_GPU`, `CVENV_BINDS`, `CVENV_APPTAINER_ARGS`, `CVENV_BACKEND`,
 `CVENV_NO_STALE_WARNING`, `CVENV_NO_PROMPT`, `CVENV_DEBUG`, `CVENV_STORE`, `CVENV_CONFIG_DIR`.
 
 ## Development

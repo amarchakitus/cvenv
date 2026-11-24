@@ -24,7 +24,9 @@
 #   --slurm-args ARGS   sbatch arguments for Slurm builds, e.g. "-A myacct -p mypart"
 #   --modify-rc | --no-modify-rc   add cvenv to your shell rc (headless default: no)
 #   --rc-file FILE      shell rc to modify (default ~/.bashrc, or ~/.zshrc for zsh)
-#   --pixi PATH  --apptainer PATH  --no-pixi-install
+#   --backend B         image backend: auto (default) | apptainer | squashfuse
+#   --pixi PATH  --apptainer PATH  --squashfuse PATH  --no-pixi-install
+#   --no-squashfuse-install   don't fetch squashfuse when neither backend is available
 #
 # Safe to re-run (upgrades, new clusters, ...). Machine-local settings go to
 # <prefix>/etc/install.conf, user settings to ~/.config/cvenv/config.json.
@@ -43,6 +45,7 @@ fi
 HEADLESS=0
 F_VERSION="" F_REPO="" F_URL="" F_BINARY="" F_SOURCE="" F_PREFIX="" F_STORE="" F_TMP=""
 F_MODE="" F_SLURM="" F_SLURM_SET=0 F_RC="" F_RCFILE="" F_PIXI="" F_APPT="" PIXI_INSTALL=1
+F_BACKEND="" F_SQFS="" SQFS_INSTALL=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --headless|--yes|-y|--non-interactive) HEADLESS=1; shift ;;
@@ -64,12 +67,16 @@ while [ $# -gt 0 ]; do
         --pixi) F_PIXI="$2"; shift 2 ;;
         --apptainer) F_APPT="$2"; shift 2 ;;
         --no-pixi-install) PIXI_INSTALL=0; shift ;;
+        --backend) F_BACKEND="$2"; shift 2 ;;
+        --squashfuse) F_SQFS="$2"; shift 2 ;;
+        --no-squashfuse-install) SQFS_INSTALL=0; shift ;;
         -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null || true; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
 [ -n "$F_VERSION$F_REPO" ] && [ -z "$F_SOURCE" ] && F_SOURCE=download
 case "$F_MODE" in ""|local|slurm) ;; *) echo "--rebuild-mode must be local or slurm" >&2; exit 2 ;; esac
+case "$F_BACKEND" in ""|auto|apptainer|squashfuse) ;; *) echo "--backend must be auto, apptainer or squashfuse" >&2; exit 2 ;; esac
 
 # ---------------------------------------------------------------- output / prompts
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -146,7 +153,7 @@ fetch() {  # fetch URL DEST
 }
 
 # ---------------------------------------------------------------- detection
-[ "$(uname -s)" = Linux ] || fail "cvenv supports Linux only (Apptainer)"
+[ "$(uname -s)" = Linux ] || fail "cvenv supports Linux only"
 case "$(uname -m)" in
     x86_64|amd64) TRIPLE=x86_64-unknown-linux-gnu ;;
     aarch64|arm64) TRIPLE=aarch64-unknown-linux-gnu ;;
@@ -191,12 +198,24 @@ detect_apptainer() {
     fi
     printf '%s' "$p"
 }
+detect_squashfuse() {
+    local p="${F_SQFS:-$(conf_get "$D_PREFIX" CVENV_INSTALL_SQUASHFUSE)}"
+    [ -n "$p" ] && [ -x "$p" ] && { printf '%s' "$p"; return; }
+    p="$(command -v squashfuse_ll || command -v squashfuse || true)"
+    [ -z "$p" ] && [ -x "$D_PREFIX/opt/squashfuse/usr/bin/squashfuse_ll" ] && p="$D_PREFIX/opt/squashfuse/usr/bin/squashfuse_ll"
+    printf '%s' "$p"
+}
+fuse_ok() { [ -e /dev/fuse ] && { command -v fusermount3 >/dev/null || command -v fusermount >/dev/null; }; }
+can_fetch_squashfuse() { command -v apt-get >/dev/null && command -v dpkg-deb >/dev/null && apt-cache show squashfuse >/dev/null 2>&1; }
 
 say "Checking this machine"
 PIXI="$(detect_pixi)"
 if [ -n "$PIXI" ]; then ok "pixi: $PIXI ($("$PIXI" --version 2>/dev/null))"; else warn "pixi: not found (can be installed)"; fi
 APPT="$(detect_apptainer)"
-if [ -n "$APPT" ]; then ok "apptainer: $APPT"; else warn "apptainer: not found (needed to build/run envs)"; fi
+if [ -n "$APPT" ]; then ok "apptainer: $APPT"; else warn "apptainer: not found (the squashfuse backend works without it)"; fi
+SQFS="$(detect_squashfuse)"
+if [ -n "$SQFS" ]; then ok "squashfuse: $SQFS"; elif can_fetch_squashfuse; then note "squashfuse: not found (can be fetched from the distro packages, no root needed)"; else note "squashfuse: not found"; fi
+if fuse_ok; then ok "FUSE: /dev/fuse and fusermount available"; else note "FUSE: not usable here (/dev/fuse or fusermount3 missing): no squashfuse backend"; fi
 HAS_SLURM=0
 if command -v sbatch >/dev/null; then HAS_SLURM=1; ok "Slurm: $(command -v sbatch)"; fi
 [ "$IN_CHECKOUT" = 1 ] && ok "running from a checkout: $SRC_DIR"
@@ -227,6 +246,11 @@ elif grep -qF "# >>> cvenv >>>" "$RCFILE" 2>/dev/null; then MODIFY_RC=yes
 else MODIFY_RC=yes; fi
 INSTALL_PIXI=0
 [ -z "$PIXI" ] && [ "$PIXI_INSTALL" = 1 ] && INSTALL_PIXI=1
+BACKEND="${F_BACKEND:-$(cfg_get backend)}"; BACKEND="${BACKEND:-auto}"
+INSTALL_SQFS=0
+if [ -z "$SQFS" ] && [ "$SQFS_INSTALL" = 1 ] && fuse_ok && can_fetch_squashfuse; then
+    { [ -z "$APPT" ] && [ "$BACKEND" != apptainer ]; } || [ "$BACKEND" = squashfuse ] && INSTALL_SQFS=1
+fi
 
 # ---------------------------------------------------------------- walkthrough
 wizard() {
@@ -274,11 +298,30 @@ wizard() {
     if [ -z "$F_APPT" ]; then
         APPT="$(expand_path "$(ask_value "apptainer executable" "$APPT")")"
     fi
+    if [ -z "$F_SQFS" ]; then
+        if [ -n "$SQFS" ]; then
+            SQFS="$(expand_path "$(ask_value "squashfuse executable" "$SQFS")")"
+            INSTALL_SQFS=0
+        elif [ "$SQFS_INSTALL" = 1 ] && fuse_ok && can_fetch_squashfuse \
+            && ask_yn "squashfuse was not found. Fetch it into $PREFIX/opt/squashfuse (3 small packages, no root)?" "$([ -z "$APPT" ] && echo y || echo n)"; then
+            INSTALL_SQFS=1
+        else
+            INSTALL_SQFS=0
+        fi
+    fi
+    if [ -z "$F_BACKEND" ]; then
+        note "apptainer: .sif images, commands run in a container (needs Apptainer)" 2>"$TTY"
+        note "squashfuse: SquashFS images mounted without root, commands run on the host" 2>"$TTY"
+        BACKEND="$(ask_choice "Which backend should new builds use?" "$BACKEND" \
+            "auto|Apptainer if installed, otherwise squashfuse" \
+            "apptainer|always Apptainer" \
+            "squashfuse|always squashfuse")"
+    fi
     echo >"$TTY"
 
     printf '%s4. Where envs and builds live%s\n' "$B" "$R" >"$TTY"
     if [ -z "$F_STORE" ]; then
-        note "New envs (pixi.toml + one .sif image each) are created in the store;" 2>"$TTY"
+        note "New envs (pixi.toml + one image file each) are created in the store;" 2>"$TTY"
         note "put it on a filesystem with space (images are 0.1-10 GB). Movable later." 2>"$TTY"
         STORE="$(expand_path "$(ask_value "Env store" "$STORE")")"
     fi
@@ -330,7 +373,9 @@ summary() {
         "install prefix" "$PREFIX" \
         "cvenv binary" "$src" \
         "pixi" "$([ "$INSTALL_PIXI" = 1 ] && echo "install to ~/.pixi/bin" || echo "${PIXI:-(none)}")" \
-        "apptainer" "${APPT:-(none - envs cannot be built/run)}" \
+        "apptainer" "${APPT:-(none)}" \
+        "squashfuse" "$([ "$INSTALL_SQFS" = 1 ] && echo "fetch into $PREFIX/opt/squashfuse" || echo "${SQFS:-(none)}")" \
+        "backend" "$BACKEND" \
         "env store" "$STORE" \
         "build scratch" "$BUILD_TMP" >&2
     if [ "$HAS_SLURM" = 1 ] || [ "$MODE" = slurm ] || [ -n "$SLURM_ARGS" ]; then
@@ -349,6 +394,10 @@ validate() {
     esac
     [ "$INSTALL_PIXI" = 1 ] || [ -x "$PIXI" ] || { warn "pixi executable not found: ${PIXI:-(none)}"; return 1; }
     if [ -n "$APPT" ] && [ ! -x "$APPT" ]; then warn "apptainer not executable: $APPT"; return 1; fi
+    if [ -n "$SQFS" ] && [ "$INSTALL_SQFS" = 0 ] && [ ! -x "$SQFS" ]; then warn "squashfuse not executable: $SQFS"; return 1; fi
+    if [ -z "$APPT" ] && [ -z "$SQFS" ] && [ "$INSTALL_SQFS" = 0 ]; then
+        warn "neither apptainer nor squashfuse: envs can't be built or run until one is installed"
+    fi
     mkdir -p "$BUILD_TMP" 2>/dev/null && [ -w "$BUILD_TMP" ] || { warn "build scratch not writable: $BUILD_TMP"; return 1; }
     return 0
 }
@@ -402,6 +451,27 @@ if [ "$INSTALL_PIXI" = 1 ]; then
     ok "$PIXI ($("$PIXI" --version))"
 fi
 PIXI="$(readlink -f "$PIXI")"
+
+if [ "$INSTALL_SQFS" = 1 ]; then
+    # Unpack the distro's squashfuse (+ the libraries this machine lacks) into the prefix:
+    # `apt-get download` and `dpkg-deb -x` need no root. cvenv sets LD_LIBRARY_PATH for it.
+    say "Fetching squashfuse"
+    SQ_DIR="$PREFIX/opt/squashfuse"
+    sq_tmp="$(mktemp -d "$SCRATCH/squashfuse-XXXXXX")"
+    sq_pkgs="squashfuse"
+    for p in $(apt-cache depends squashfuse 2>/dev/null | awk '/Depends:/ {print $2}' | tr -d '<>' | sort -u); do
+        dpkg -s "$p" >/dev/null 2>&1 || sq_pkgs="$sq_pkgs $p"
+    done
+    ( cd "$sq_tmp" && apt-get download $sq_pkgs >/dev/null 2>&1 ) || { rm -rf "$sq_tmp"; fail "apt-get download $sq_pkgs failed"; }
+    rm -rf "$SQ_DIR"; mkdir -p "$SQ_DIR"
+    for f in "$sq_tmp"/*.deb; do dpkg-deb -x "$f" "$SQ_DIR"; done
+    rm -rf "$sq_tmp"
+    SQFS="$SQ_DIR/usr/bin/squashfuse_ll"
+    triple="$(uname -m)-linux-gnu"
+    sq_out="$(LD_LIBRARY_PATH="$SQ_DIR/usr/lib/$triple:$SQ_DIR/lib/$triple${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$SQFS" --help 2>&1 || true)"
+    case "$sq_out" in *squashfuse*) ;; *) fail "the fetched squashfuse does not run ($SQFS): $sq_out" ;; esac
+    ok "$SQFS ($sq_pkgs)"
+fi
 
 say "Installing the cvenv binary"
 install_bin() {  # install_bin FILE
@@ -459,6 +529,7 @@ cat > "$CONF" <<EOF
 export CVENV_INSTALL_PIXI=$(printf '%q' "$PIXI")
 export CVENV_INSTALL_APPTAINER=$(printf '%q' "$APPT")
 export CVENV_INSTALL_APPTAINER_CONF=$(printf '%q' "$APPT_CONF")
+export CVENV_INSTALL_SQUASHFUSE=$(printf '%q' "$SQFS")
 export CVENV_INSTALL_BUILD_TMPDIR=$(printf '%q' "$BUILD_TMP")
 EOF
 ok "machine settings: $CONF"
@@ -470,6 +541,8 @@ cfg() {  # cfg set|unset KEY [VALUE] - quiet unless it fails
 cfg set store "$STORE" && ok "store = $STORE"
 mkdir -p "$STORE"
 cfg set rebuild-mode "$MODE" && ok "rebuild-mode = $MODE"
+if [ "$BACKEND" = auto ]; then cfg unset backend; else cfg set backend "$BACKEND"; fi
+ok "backend = $BACKEND"
 if [ -n "$SLURM_ARGS" ]; then
     cfg set slurm-args "$SLURM_ARGS" && ok "slurm-args = $SLURM_ARGS"
 else
