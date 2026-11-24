@@ -14,6 +14,7 @@ mod config;
 mod env;
 mod runtime;
 mod squash;
+mod update;
 mod util;
 mod wrap;
 
@@ -71,6 +72,8 @@ Working with an env (uses the active env unless --env NAME|PATH is given)
   task [pixi task args]   manage pixi tasks in the manifest
 
 Setup
+  self-update [--check] [--version VER] [--force]
+                          update cvenv to the latest release (or VER)
   shell-init              print shell code for ~/.bashrc:  eval \"$(cvenv shell-init)\"
   agent-guide             print the usage guide for AI agents (rules, recipes, troubleshooting)
 
@@ -250,6 +253,18 @@ enum Cmd {
     },
     /// Print shell integration code
     ShellInit { shell: Option<String> },
+    /// Update cvenv to the latest release (also: `cvenv self update`)
+    SelfUpdate {
+        /// Only report whether an update is available
+        #[arg(long)]
+        check: bool,
+        /// Install this release instead of the latest (e.g. v0.3.0; also downgrades)
+        #[arg(long, value_name = "VER")]
+        version: Option<String>,
+        /// Reinstall the same version, or replace a binary built from a checkout
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -293,6 +308,10 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Some("run") => return cmd_run(&argv[1..], false),
         Some("exec") => return cmd_run(&argv[1..], true),
         Some("shell") => return cmd_shell(&argv[1..]),
+        Some("self") if argv.get(1).map(String::as_str) == Some("update") => {
+            let rest: Vec<String> = std::iter::once("self-update".to_string()).chain(argv[2..].iter().cloned()).collect();
+            return dispatch(&rest);
+        }
         _ => {}
     }
     let cli = Cli::parse_from(std::iter::once("cvenv".to_string()).chain(argv.iter().cloned()));
@@ -329,6 +348,7 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Cmd::Move { name, dest } => cmd_move(&name, &dest),
         Cmd::Unregister { name, delete, yes } => cmd_unregister(&name, delete, yes),
         Cmd::Config { action, key, value } => cmd_config(action.as_deref(), key.as_deref(), value.as_deref()),
+        Cmd::SelfUpdate { check, version, force } => update::self_update(check, version, force),
         Cmd::ShellInit { .. } => {
             print!("{}", runtime::shell_init());
             Ok(())

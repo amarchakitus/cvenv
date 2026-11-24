@@ -15,6 +15,7 @@ Show all settings and where each value comes from with `cvenv config`. Change th
 | `pixi-cache` | Persistent package cache for builds |
 | `base-image` | Default base image for Apptainer builds |
 | `apptainer`, `squashfuse`, `pixi` | Tool paths (set by the installer) |
+| `repo` | GitHub repo that `cvenv self-update` installs releases from (default `amarchakitus/cvenv`) |
 | `mount-timeout` | Seconds before an unused squashfuse mount is unmounted (default 600) |
 | `mount-mode` | squashfuse mounts: `auto` (systemd user unit when available), `systemd` or `direct` |
 | `mount-root` | Where squashfuse images are mounted (default `<store>/.cvenv-mnt`) |
@@ -53,3 +54,4 @@ isolate-user-site = true      # PYTHONNOUSERSITE=1
 | `CVENV_NO_PROMPT` | Don't prefix the shell prompt on `cvenv activate` |
 | `CVENV_DEBUG` | Print the container command or the squashfuse mount and exec |
 | `CVENV_CONFIG_DIR` | Use another configuration directory |
+| `CVENV_RELEASES_URL` | Download `cvenv self-update` releases from this URL instead of GitHub (e.g. a mirror) |

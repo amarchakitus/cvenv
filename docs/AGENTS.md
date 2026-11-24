@@ -33,7 +33,8 @@ Print this guide any time: `cvenv agent-guide`.
 6. Batch dependency changes: several `cvenv add` calls, then **one** rebuild.
 7. Don't edit or delete files under `<env>/.cvenv/` by hand (except reading logs).
 8. **Ask the user before** `cvenv wrap-install ... --replace`, `cvenv share`, `cvenv unregister --delete`,
-   or deleting any `*.cvenv-orig-*` backup: these change or remove the user's files or permissions.
+   `cvenv self-update`, or deleting any `*.cvenv-orig-*` backup: these change or remove the user's
+   files, permissions or tools.
 
 ## Decide what to do
 
