@@ -43,11 +43,17 @@ cvenv deactivate
 
 For a GPU env, declare the CUDA version: `cvenv init gpuenv --cuda 12.0 python=3.12 pytorch-gpu`.
 
+For a project, run `cvenv init .` in its directory (like `uv init .`): `pixi.toml` and a git
+repository are created there (no repository inside an existing one; `--vcs none` to skip),
+the env is named after the directory (`--name` to change) and its images go to `<store>/NAME`,
+away from the project.
+
 ## Commands
 
 | Command | Description |
 |---|---|
 | `cvenv init NAME [PKG…]` | Creates an env in `<store>/NAME` (`--path DIR`, `--cuda VER`, `-c CHANNEL`) |
+| `cvenv init DIR [PKG…]` | Creates (or adopts) `pixi.toml` in a project directory such as `.`, plus a git repo; images go to `<store>/NAME` |
 | `cvenv init NAME --import FILE` | Creates an env from `environment.yml` or `requirements.txt` |
 | `cvenv init NAME --manifest PATH` | Registers an existing `pixi.toml` or `pyproject.toml` |
 | `cvenv wrap NAME IMAGE` | Uses an existing container: `.sif`, `docker://…`, `oras://…` |
