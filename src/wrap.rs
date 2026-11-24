@@ -219,7 +219,7 @@ fn new_env_dir(name: &str, path: Option<String>) -> Result<PathBuf> {
             bail!("{} is already used by env '{}'", dir.display(), n);
         }
     }
-    fs::create_dir_all(dir.join(crate::env::ART_DIR))?;
+    crate::env::ensure_art_dir(&dir)?;
     Ok(dir)
 }
 

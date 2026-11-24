@@ -152,6 +152,7 @@ Get an env's path for shim use: `cvenv info --env NAME | sed -n 's/^path *: //p'
 <env>/.cvenv/bin/          # shims (python, ...): symlinks to the cvenv binary
 <env>/.cvenv/build.log     # last local build log; build-<jobid>.log for Slurm builds
 <env>/.cvenv/packages.txt  # `pixi list` of the image
+<env>/.cvenv/.gitignore    # `*`: .cvenv/ keeps itself out of git
 ~/.config/cvenv/config.json   # settings (cvenv config); registry.json: env name -> path
 ```
 
