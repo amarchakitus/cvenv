@@ -401,7 +401,7 @@ fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String], backen
     let sif = env.art().join(crate::env::IMAGE_NAME);
     if backend == Backend::Apptainer {
         let (kind, _) = parse_base_image(base);
-        let base_ref = if kind == "localimage" { base.to_string() } else if base.contains("://") { base.to_string() } else { format!("docker://{}", base) };
+        let base_ref = if kind == "localimage" || base.contains("://") { base.to_string() } else { format!("docker://{}", base) };
         fetch_image(&base_ref, &sif, false)?;
     }
     squash(tree, &env.art().join(INSTALL_SQFS))?;

@@ -13,3 +13,5 @@ c-compiler = "*"
 [tasks]
 build = "bash scripts/build.sh"
 test = "bash scripts/build.sh --test"
+lint = "bash scripts/build.sh --lint"   # rustfmt --check + clippy -D warnings
+fmt = "bash scripts/build.sh --fmt"
