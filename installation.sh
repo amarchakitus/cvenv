@@ -1,39 +1,41 @@
 #!/usr/bin/env bash
-# cvenv installer.
-#
-# By default this walks you through the install: it detects what is available,
-# asks about the usual settings (Enter keeps the suggested value), shows a summary
-# and only then changes anything. Use --headless for scripted installs.
+# cvenv installer
 #
 #   ./installation.sh [options]
-#   curl -fsSL https://raw.githubusercontent.com/amarchakitus/cvenv/main/installation.sh | bash -s -- [options]
+#   curl -fsSL https://raw.githubusercontent.com/amarchakitus/cvenv/main/installation.sh | bash
 #
-# Options (each one pre-answers the matching question)
-#   --headless          no questions: use flags, current settings and detected defaults
-#                       (aliases: --yes, -y, --non-interactive)
-#   --version vX.Y.Z    release to install (default: latest)
-#   --repo OWNER/NAME   GitHub repo with the releases (default: amarchakitus/cvenv)
-#   --url URL           download the binary from this URL
-#   --binary PATH       install this local binary
-#   --from-source       build from source with pixi (development; needs a git checkout)
-#   --keep-binary       keep the already installed binary (just reconfigure)
-#   --prefix DIR        install to DIR/bin/cvenv (default: the checkout, or ~/.cvenv)
-#   --store DIR         default directory for new envs
-#   --build-tmpdir DIR  node-local scratch for image builds (default /tmp)
-#   --rebuild-mode M    where `cvenv rebuild` builds: local | slurm
-#   --slurm-args ARGS   sbatch arguments for Slurm builds, e.g. "-A myacct -p mypart"
-#   --modify-rc | --no-modify-rc   add cvenv to your shell rc (headless default: no)
-#   --rc-file FILE      shell rc to modify (default ~/.bashrc, or ~/.zshrc for zsh)
-#   --backend B         image backend: auto (default) | apptainer | squashfuse
-#   --pixi PATH  --apptainer PATH  --squashfuse PATH  --no-pixi-install
-#   --no-squashfuse-install   don't fetch squashfuse when neither backend is available
+# Detects pixi, Apptainer, squashfuse and Slurm, asks where envs should live (plus sbatch
+# arguments on Slurm clusters, and whether to set up your shell), shows the plan and installs
+# after confirmation. Anything missing is installed into your home directory; no root needed.
+# Safe to re-run: it upgrades cvenv and keeps your settings.
 #
-# Safe to re-run (upgrades, new clusters, ...). Machine-local settings go to
-# <prefix>/etc/install.conf, user settings to ~/.config/cvenv/config.json.
+# Options
+#   -y, --yes             no questions: use flags, current settings and defaults
+#   --store DIR           where envs are created (default ~/.cvenv/envs)
+#   --slurm-args ARGS     sbatch arguments for build jobs, e.g. "-A myacct -p mypart"
+#   --modify-rc, --no-modify-rc
+#                         add cvenv to your shell rc (default: ask; with --yes: only
+#                         update an existing cvenv block)
+#   -h, --help            show this help
+#
+# Advanced
+#   --prefix DIR          install location of bin/cvenv (default: this checkout, or ~/.cvenv)
+#   --version vX.Y.Z      release to install (default: latest)
+#   --repo OWNER/NAME     GitHub repo with the releases (default: amarchakitus/cvenv)
+#   --url URL, --binary FILE, --from-source, --keep-binary
+#                         where the cvenv binary comes from (default: download the release)
+#   --backend B           image backend: auto (default), apptainer or squashfuse
+#   --pixi PATH, --apptainer PATH, --squashfuse PATH
+#                         use these tools instead of the detected ones
+#   --no-pixi-install, --no-squashfuse-install
+#                         don't install missing tools
+#   --build-tmpdir DIR    node-local scratch for builds (default /tmp)
+#   --rebuild-mode MODE   where `cvenv rebuild` builds by default: local or slurm
+#   --rc-file FILE        shell rc to modify (default ~/.bashrc, or ~/.zshrc for zsh)
+#
+# Machine settings go to <prefix>/etc/install.conf, user settings to ~/.config/cvenv/config.json.
 set -euo pipefail
 
-# Fill this in once the GitHub repo exists, so `curl ... | bash` installs work
-# without a checkout (a clone's `origin` remote is used automatically otherwise).
 DEFAULT_GITHUB_REPO="${CVENV_GITHUB_REPO:-amarchakitus/cvenv}"
 
 SRC_DIR=""
@@ -41,40 +43,45 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SRC_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
+usage() {
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]:-$0}" 2>/dev/null \
+        || echo "see https://github.com/$DEFAULT_GITHUB_REPO"
+}
+
 # ---------------------------------------------------------------- arguments
-HEADLESS=0
+YES=0
 F_VERSION="" F_REPO="" F_URL="" F_BINARY="" F_SOURCE="" F_PREFIX="" F_STORE="" F_TMP=""
-F_MODE="" F_SLURM="" F_SLURM_SET=0 F_RC="" F_RCFILE="" F_PIXI="" F_APPT="" PIXI_INSTALL=1
-F_BACKEND="" F_SQFS="" SQFS_INSTALL=1
+F_MODE="" F_SLURM="" F_SLURM_SET=0 F_RC="" F_RCFILE="" F_PIXI="" F_APPT="" F_SQFS="" F_BACKEND=""
+PIXI_INSTALL=1 SQFS_INSTALL=1
+need() { [ $# -ge 2 ] || { echo "option $1 needs a value (see --help)" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
-        --headless|--yes|-y|--non-interactive) HEADLESS=1; shift ;;
-        --version) F_VERSION="$2"; shift 2 ;;
-        --repo) F_REPO="$2"; shift 2 ;;
-        --url) F_URL="$2"; F_SOURCE=url; shift 2 ;;
-        --binary) F_BINARY="$2"; F_SOURCE=binary; shift 2 ;;
-        --from-source) F_SOURCE=source; shift ;;
-        --keep-binary) F_SOURCE=keep; shift ;;
-        --prefix) F_PREFIX="$2"; shift 2 ;;
-        --store) F_STORE="$2"; shift 2 ;;
+        -y|--yes|--headless|--non-interactive) YES=1; shift ;;
+        --store) need "$@"; F_STORE="$2"; shift 2 ;;
         --store=*) F_STORE="${1#*=}"; shift ;;
-        --build-tmpdir) F_TMP="$2"; shift 2 ;;
-        --rebuild-mode) F_MODE="$2"; shift 2 ;;
-        --slurm-args) F_SLURM="$2"; F_SLURM_SET=1; shift 2 ;;
+        --slurm-args) need "$@"; F_SLURM="$2"; F_SLURM_SET=1; shift 2 ;;
         --modify-rc) F_RC=yes; shift ;;
         --no-modify-rc) F_RC=no; shift ;;
-        --rc-file) F_RCFILE="$2"; shift 2 ;;
-        --pixi) F_PIXI="$2"; shift 2 ;;
-        --apptainer) F_APPT="$2"; shift 2 ;;
+        --prefix) need "$@"; F_PREFIX="$2"; shift 2 ;;
+        --version) need "$@"; F_VERSION="$2"; shift 2 ;;
+        --repo) need "$@"; F_REPO="$2"; shift 2 ;;
+        --url) need "$@"; F_URL="$2"; F_SOURCE=url; shift 2 ;;
+        --binary) need "$@"; F_BINARY="$2"; F_SOURCE=binary; shift 2 ;;
+        --from-source) F_SOURCE=source; shift ;;
+        --keep-binary) F_SOURCE=keep; shift ;;
+        --backend) need "$@"; F_BACKEND="$2"; shift 2 ;;
+        --pixi) need "$@"; F_PIXI="$2"; shift 2 ;;
+        --apptainer) need "$@"; F_APPT="$2"; shift 2 ;;
+        --squashfuse) need "$@"; F_SQFS="$2"; shift 2 ;;
         --no-pixi-install) PIXI_INSTALL=0; shift ;;
-        --backend) F_BACKEND="$2"; shift 2 ;;
-        --squashfuse) F_SQFS="$2"; shift 2 ;;
         --no-squashfuse-install) SQFS_INSTALL=0; shift ;;
-        -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null || true; exit 0 ;;
+        --build-tmpdir) need "$@"; F_TMP="$2"; shift 2 ;;
+        --rebuild-mode) need "$@"; F_MODE="$2"; shift 2 ;;
+        --rc-file) need "$@"; F_RCFILE="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
-[ -n "$F_VERSION$F_REPO" ] && [ -z "$F_SOURCE" ] && F_SOURCE=download
 case "$F_MODE" in ""|local|slurm) ;; *) echo "--rebuild-mode must be local or slurm" >&2; exit 2 ;; esac
 case "$F_BACKEND" in ""|auto|apptainer|squashfuse) ;; *) echo "--backend must be auto, apptainer or squashfuse" >&2; exit 2 ;; esac
 
@@ -84,31 +91,26 @@ if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
 else
     B="" DIM="" BLUE="" GREEN="" YEL="" RED="" R=""
 fi
-say()  { printf '%s==>%s %s%s%s\n' "$BLUE" "$R" "$B" "$*" "$R" >&2; }
-ok()   { printf '    %s✔%s %s\n' "$GREEN" "$R" "$*" >&2; }
-warn() { printf '    %s!%s %s\n' "$YEL" "$R" "$*" >&2; }
-note() { printf '    %s%s%s\n' "$DIM" "$*" "$R" >&2; }
-fail() { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
+section() { printf '\n%s%s%s\n' "$B" "$*" "$R" >&2; }
+found()   { printf '  %s✔%s %-11s %s\n' "$GREEN" "$R" "$1" "$2" >&2; }
+missing() { printf '  %s-%s %-11s %s%s%s\n' "$DIM" "$R" "$1" "$DIM" "$2" "$R" >&2; }
+row()     { printf '  %-11s %s\n' "$1" "$2" >&2; }
+step()    { printf '%s==>%s %s\n' "$BLUE" "$R" "$*" >&2; }
+warn()    { printf '  %s! %s%s\n' "$YEL" "$*" "$R" >&2; }
+fail()    { printf '%serror:%s %s\n' "$RED" "$R" "$*" >&2; exit 1; }
 
 # Prompts read from the terminal, so they also work under `curl ... | bash`.
 TTY=""
-if [ "$HEADLESS" = 0 ]; then
+if [ "$YES" = 0 ]; then
     if { : </dev/tty >/dev/tty; } 2>/dev/null; then
         TTY=/dev/tty
     else
-        HEADLESS=1
-        printf 'no terminal available - running headless (see --help for flags)\n' >&2
+        YES=1
+        printf 'No terminal available: installing with defaults (see --help for options).\n' >&2
     fi
 fi
 
-expand_path() {  # ~ and relative paths -> absolute
-    local p="$1"
-    case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#\~/}" ;; esac
-    case "$p" in /*) ;; "") ;; *) p="$PWD/$p" ;; esac
-    printf '%s' "$p"
-}
-
-ask_value() {  # ask_value "Question" "default" -> answer on stdout
+ask_value() {  # ask_value "Question" "default" -> answer on stdout ("-" clears)
     local a
     printf '  %s %s[%s]%s: ' "$1" "$DIM" "${2:-none}" "$R" >"$TTY"
     IFS= read -r a <"$TTY" || a=""
@@ -119,37 +121,22 @@ ask_yn() {  # ask_yn "Question" y|n -> returns 0 for yes
     local a d="$2"
     printf '  %s %s[%s]%s ' "$1" "$DIM" "$([ "$d" = y ] && echo Y/n || echo y/N)" "$R" >"$TTY"
     IFS= read -r a <"$TTY" || a=""
-    a="${a:-$d}"
-    [[ "$a" =~ ^[Yy] ]]
+    [[ "${a:-$d}" =~ ^[Yy] ]]
 }
 
-ask_choice() {  # ask_choice "Question" default_key "key|description" ... -> key on stdout
-    local q="$1" d="$2" i=1 a opt key
-    shift 2
-    printf '  %s\n' "$q" >"$TTY"
-    for opt in "$@"; do
-        key="${opt%%|*}"
-        printf '    %s%d)%s %-9s %s%s\n' "$B" "$i" "$R" "$key" "${opt#*|}" "$([ "$key" = "$d" ] && echo "  (default)")" >"$TTY"
-        i=$((i + 1))
-    done
-    while true; do
-        printf '  choice %s[%s]%s: ' "$DIM" "$d" "$R" >"$TTY"
-        IFS= read -r a <"$TTY" || a=""
-        a="${a:-$d}"
-        i=1
-        for opt in "$@"; do
-            key="${opt%%|*}"
-            if [ "$a" = "$i" ] || [ "$a" = "$key" ]; then printf '%s' "$key"; return; fi
-            i=$((i + 1))
-        done
-        printf '  please enter a number 1-%d\n' "$#" >"$TTY"
-    done
+expand_path() {  # ~ and relative paths -> absolute
+    local p="$1"
+    case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/${p#\~/}" ;; esac
+    case "$p" in /*|"") ;; *) p="$PWD/$p" ;; esac
+    printf '%s' "$p"
 }
+
+tildify() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
 
 fetch() {  # fetch URL DEST
     if command -v curl >/dev/null; then curl -fsSL --retry 3 -o "$2" "$1"
     elif command -v wget >/dev/null; then wget -q -O "$2" "$1"
-    else fail "need curl or wget to download"; fi
+    else fail "curl or wget is needed to download"; fi
 }
 
 # ---------------------------------------------------------------- detection
@@ -169,18 +156,12 @@ cfg_get() {  # current value from ~/.config/cvenv/config.json (flat string value
     sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\"[[:space:]]*,\{0,1\}[[:space:]]*\$/\1/p" "$CFG_DIR/config.json" | head -n1
 }
 
-D_PREFIX="${F_PREFIX:-$([ "$IN_CHECKOUT" = 1 ] && echo "$SRC_DIR" || echo "${CVENV_PREFIX:-$HOME/.cvenv}")}"
+PREFIX="$(expand_path "${F_PREFIX:-$([ "$IN_CHECKOUT" = 1 ] && echo "$SRC_DIR" || echo "${CVENV_PREFIX:-$HOME/.cvenv}")}")"
 conf_get() {  # value from an existing <prefix>/etc/install.conf
-    local f="$1/etc/install.conf"
+    local f="$PREFIX/etc/install.conf"
     [ -f "$f" ] || return 0
-    ( set +u; . "$f" >/dev/null 2>&1; eval "printf '%s' \"\${$2:-}\"" )
+    ( set +u; . "$f" >/dev/null 2>&1; eval "printf '%s' \"\${$1:-}\"" )
 }
-
-D_REPO="${F_REPO:-$DEFAULT_GITHUB_REPO}"
-if [ -z "$D_REPO" ] && [ "$IN_CHECKOUT" = 1 ]; then
-    origin="$(git -C "$SRC_DIR" remote get-url origin 2>/dev/null || true)"
-    D_REPO="$(printf '%s' "$origin" | sed -nE 's#^(https?://|git@)github\.com[:/]([^/]+/[^/]+)$#\2#p' | sed 's/\.git$//')"
-fi
 
 detect_pixi() {
     local p="${F_PIXI:-$(command -v pixi || true)}"
@@ -199,230 +180,128 @@ detect_apptainer() {
     printf '%s' "$p"
 }
 detect_squashfuse() {
-    local p="${F_SQFS:-$(conf_get "$D_PREFIX" CVENV_INSTALL_SQUASHFUSE)}"
+    local p="${F_SQFS:-$(conf_get CVENV_INSTALL_SQUASHFUSE)}"
     [ -n "$p" ] && [ -x "$p" ] && { printf '%s' "$p"; return; }
     p="$(command -v squashfuse_ll || command -v squashfuse || true)"
-    [ -z "$p" ] && [ -x "$D_PREFIX/opt/squashfuse/usr/bin/squashfuse_ll" ] && p="$D_PREFIX/opt/squashfuse/usr/bin/squashfuse_ll"
+    [ -z "$p" ] && [ -x "$PREFIX/opt/squashfuse/usr/bin/squashfuse_ll" ] && p="$PREFIX/opt/squashfuse/usr/bin/squashfuse_ll"
     printf '%s' "$p"
 }
 fuse_ok() { [ -e /dev/fuse ] && { command -v fusermount3 >/dev/null || command -v fusermount >/dev/null; }; }
 can_fetch_squashfuse() { command -v apt-get >/dev/null && command -v dpkg-deb >/dev/null && apt-cache show squashfuse >/dev/null 2>&1; }
 
-say "Checking this machine"
 PIXI="$(detect_pixi)"
-if [ -n "$PIXI" ]; then ok "pixi: $PIXI ($("$PIXI" --version 2>/dev/null))"; else warn "pixi: not found (can be installed)"; fi
 APPT="$(detect_apptainer)"
-if [ -n "$APPT" ]; then ok "apptainer: $APPT"; else warn "apptainer: not found (the squashfuse backend works without it)"; fi
 SQFS="$(detect_squashfuse)"
-if [ -n "$SQFS" ]; then ok "squashfuse: $SQFS"; elif can_fetch_squashfuse; then note "squashfuse: not found (can be fetched from the distro packages, no root needed)"; else note "squashfuse: not found"; fi
-if fuse_ok; then ok "FUSE: /dev/fuse and fusermount available"; else note "FUSE: not usable here (/dev/fuse or fusermount3 missing): no squashfuse backend"; fi
-HAS_SLURM=0
-if command -v sbatch >/dev/null; then HAS_SLURM=1; ok "Slurm: $(command -v sbatch)"; fi
-[ "$IN_CHECKOUT" = 1 ] && ok "running from a checkout: $SRC_DIR"
-if [ -x "$D_PREFIX/bin/cvenv" ] && "$D_PREFIX/bin/cvenv" --version >/dev/null 2>&1; then
-    ok "installed: $D_PREFIX/bin/cvenv ($("$D_PREFIX/bin/cvenv" --version))"
-fi
+HAS_SLURM=0; command -v sbatch >/dev/null && HAS_SLURM=1
+INSTALLED=""
+[ -x "$PREFIX/bin/cvenv" ] && INSTALLED="$("$PREFIX/bin/cvenv" --version 2>/dev/null || true)"
 
-# ---------------------------------------------------------------- defaults
-PREFIX="$D_PREFIX"
-REPO_SLUG="$D_REPO"
+# ---------------------------------------------------------------- decisions (no questions)
+REPO_SLUG="${F_REPO:-$DEFAULT_GITHUB_REPO}"
 VERSION="${F_VERSION:-latest}"
 URL="$F_URL"
-BINARY="$F_BINARY"
-if [ -n "$F_SOURCE" ]; then SOURCE="$F_SOURCE"
-elif [ -n "$REPO_SLUG" ]; then SOURCE=download
-elif [ -x "$PREFIX/bin/cvenv" ] && "$PREFIX/bin/cvenv" --version >/dev/null 2>&1; then SOURCE=keep
-elif [ "$IN_CHECKOUT" = 1 ]; then SOURCE=source
-else SOURCE=download; fi
-STORE="${F_STORE:-$(cfg_get store)}"; STORE="${STORE:-$HOME/.cvenv/envs}"
-BUILD_TMP="${F_TMP:-$(conf_get "$PREFIX" CVENV_INSTALL_BUILD_TMPDIR)}"; BUILD_TMP="${BUILD_TMP:-${CVENV_BUILD_TMPDIR:-/tmp}}"
-MODE="${F_MODE:-$(cfg_get rebuild-mode)}"; MODE="${MODE:-local}"
-if [ "$F_SLURM_SET" = 1 ]; then SLURM_ARGS="$F_SLURM"; else SLURM_ARGS="$(cfg_get slurm-args)"; fi
-RCFILE="${F_RCFILE:-$HOME/.bashrc}"
-[ -z "$F_RCFILE" ] && [ "${SHELL##*/}" = zsh ] && RCFILE="$HOME/.zshrc"
-if [ -n "$F_RC" ]; then MODIFY_RC="$F_RC"
-elif [ "$HEADLESS" = 1 ]; then MODIFY_RC=no
-elif grep -qF "# >>> cvenv >>>" "$RCFILE" 2>/dev/null; then MODIFY_RC=yes
-else MODIFY_RC=yes; fi
-INSTALL_PIXI=0
-[ -z "$PIXI" ] && [ "$PIXI_INSTALL" = 1 ] && INSTALL_PIXI=1
+BINARY="$(expand_path "$F_BINARY")"
+SOURCE="${F_SOURCE:-download}"
 BACKEND="${F_BACKEND:-$(cfg_get backend)}"; BACKEND="${BACKEND:-auto}"
+BUILD_TMP="$(expand_path "${F_TMP:-$(conf_get CVENV_INSTALL_BUILD_TMPDIR)}")"; BUILD_TMP="${BUILD_TMP:-${CVENV_BUILD_TMPDIR:-/tmp}}"
+MODE="${F_MODE:-$(cfg_get rebuild-mode)}"; MODE="${MODE:-local}"
+STORE="$(expand_path "${F_STORE:-$(cfg_get store)}")"; STORE="${STORE:-$HOME/.cvenv/envs}"
+if [ "$F_SLURM_SET" = 1 ]; then SLURM_ARGS="$F_SLURM"; else SLURM_ARGS="$(cfg_get slurm-args)"; fi
+RCFILE="$(expand_path "${F_RCFILE:-$HOME/.bashrc}")"
+[ -z "$F_RCFILE" ] && [ "${SHELL##*/}" = zsh ] && RCFILE="$HOME/.zshrc"
+RC_HAS_BLOCK=0; grep -qF "# >>> cvenv >>>" "$RCFILE" 2>/dev/null && RC_HAS_BLOCK=1
+# with --yes, a block added earlier is kept up to date (it may point at an old location)
+if [ -n "$F_RC" ]; then MODIFY_RC="$F_RC"; elif [ "$YES" = 1 ]; then MODIFY_RC=$([ "$RC_HAS_BLOCK" = 1 ] && echo yes || echo no); else MODIFY_RC=ask; fi
+
+INSTALL_PIXI=0
+if [ -z "$PIXI" ]; then
+    [ "$PIXI_INSTALL" = 1 ] || fail "pixi was not found; install it or pass --pixi PATH"
+    INSTALL_PIXI=1
+fi
 INSTALL_SQFS=0
 if [ -z "$SQFS" ] && [ "$SQFS_INSTALL" = 1 ] && fuse_ok && can_fetch_squashfuse; then
-    { [ -z "$APPT" ] && [ "$BACKEND" != apptainer ]; } || [ "$BACKEND" = squashfuse ] && INSTALL_SQFS=1
+    if { [ -z "$APPT" ] && [ "$BACKEND" != apptainer ]; } || [ "$BACKEND" = squashfuse ]; then INSTALL_SQFS=1; fi
 fi
 
-# ---------------------------------------------------------------- walkthrough
-wizard() {
-    printf '\n%sSet up cvenv%s - press Enter to keep the value in [brackets], "-" to clear it.\n\n' "$B" "$R" >"$TTY"
-
-    if [ -z "$F_PREFIX" ]; then
-        printf '%s1. Install location%s  %s(bin/cvenv and etc/install.conf go here)%s\n' "$B" "$R" "$DIM" "$R" >"$TTY"
-        PREFIX="$(expand_path "$(ask_value "Install prefix" "$PREFIX")")"
-        echo >"$TTY"
-    fi
-
-    if [ -z "$F_SOURCE" ]; then
-        # the prefix may have changed: "keep" only makes sense if a binary is there
-        if [ "$SOURCE" = keep ] && [ ! -x "$PREFIX/bin/cvenv" ]; then
-            if [ -n "$REPO_SLUG" ]; then SOURCE=download; elif [ "$IN_CHECKOUT" = 1 ]; then SOURCE=source; else SOURCE=download; fi
-        fi
-        printf '%s2. cvenv binary%s\n' "$B" "$R" >"$TTY"
-        local opts=("download|prebuilt static binary from the GitHub release (recommended)")
-        [ "$IN_CHECKOUT" = 1 ] && opts+=("source|build from this checkout with pixi (development)")
-        opts+=("binary|install a binary file you already have")
-        [ -x "$PREFIX/bin/cvenv" ] && opts+=("keep|keep the installed $("$PREFIX/bin/cvenv" --version 2>/dev/null || echo binary), only reconfigure")
-        SOURCE="$(ask_choice "Where should the cvenv binary come from?" "$SOURCE" "${opts[@]}")"
-        case "$SOURCE" in
-            download)
-                REPO_SLUG="$(ask_value "GitHub repo (OWNER/NAME)" "$REPO_SLUG")"
-                VERSION="$(ask_value "Release version" "$VERSION")" ;;
-            binary)
-                BINARY="$(expand_path "$(ask_value "Path to the binary" "$BINARY")")" ;;
-        esac
-        echo >"$TTY"
-    fi
-
-    printf '%s3. Tools%s\n' "$B" "$R" >"$TTY"
-    if [ -z "$F_PIXI" ]; then
-        if [ -n "$PIXI" ]; then
-            PIXI="$(expand_path "$(ask_value "pixi executable" "$PIXI")")"
-            INSTALL_PIXI=0
-        elif [ "$PIXI_INSTALL" = 1 ] && ask_yn "pixi was not found. Install it to ~/.pixi/bin (one binary)?" y; then
-            INSTALL_PIXI=1
-        else
-            PIXI="$(expand_path "$(ask_value "pixi executable" "")")"
-            INSTALL_PIXI=0
-        fi
-    fi
-    if [ -z "$F_APPT" ]; then
-        APPT="$(expand_path "$(ask_value "apptainer executable" "$APPT")")"
-    fi
-    if [ -z "$F_SQFS" ]; then
-        if [ -n "$SQFS" ]; then
-            SQFS="$(expand_path "$(ask_value "squashfuse executable" "$SQFS")")"
-            INSTALL_SQFS=0
-        elif [ "$SQFS_INSTALL" = 1 ] && fuse_ok && can_fetch_squashfuse \
-            && ask_yn "squashfuse was not found. Fetch it into $PREFIX/opt/squashfuse (3 small packages, no root)?" "$([ -z "$APPT" ] && echo y || echo n)"; then
-            INSTALL_SQFS=1
-        else
-            INSTALL_SQFS=0
-        fi
-    fi
-    if [ -z "$F_BACKEND" ]; then
-        note "apptainer: .sif images, commands run in a container (needs Apptainer)" 2>"$TTY"
-        note "squashfuse: SquashFS images mounted without root, commands run on the host" 2>"$TTY"
-        BACKEND="$(ask_choice "Which backend should new builds use?" "$BACKEND" \
-            "auto|Apptainer if installed, otherwise squashfuse" \
-            "apptainer|always Apptainer" \
-            "squashfuse|always squashfuse")"
-    fi
-    echo >"$TTY"
-
-    printf '%s4. Where envs and builds live%s\n' "$B" "$R" >"$TTY"
-    if [ -z "$F_STORE" ]; then
-        note "New envs (pixi.toml + one image file each) are created in the store;" 2>"$TTY"
-        note "put it on a filesystem with space (images are 0.1-10 GB). Movable later." 2>"$TTY"
-        STORE="$(expand_path "$(ask_value "Env store" "$STORE")")"
-    fi
-    if [ -z "$F_TMP" ]; then
-        note "Image builds unpack thousands of temporary files here; it must be node-local" 2>"$TTY"
-        note "disk (not NFS/GPFS/Lustre) - they are deleted after each build." 2>"$TTY"
-        BUILD_TMP="$(expand_path "$(ask_value "Build scratch directory" "$BUILD_TMP")")"
-    fi
-    echo >"$TTY"
-
-    if [ "$HAS_SLURM" = 1 ] && { [ -z "$F_MODE" ] || [ "$F_SLURM_SET" = 0 ]; }; then
-        printf '%s5. Slurm builds%s  %s(heavy envs, e.g. PyTorch, are better built on a compute node)%s\n' "$B" "$R" "$DIM" "$R" >"$TTY"
-        if [ -z "$F_MODE" ]; then
-            MODE="$(ask_choice "Where should \`cvenv rebuild\` build by default?" "$MODE" \
-                "local|on the current node (use \`cvenv rebuild --slurm\` per build)" \
-                "slurm|submit a Slurm job (use \`cvenv rebuild --local\` per build)")"
-        fi
-        if [ "$F_SLURM_SET" = 0 ]; then
-            note "sbatch arguments for build jobs, e.g. \"-A <account> -p <partition>\"" 2>"$TTY"
-            note "(defaults already include --cpus-per-task=8 --mem=32G --time=02:00:00)" 2>"$TTY"
-            SLURM_ARGS="$(ask_value "sbatch arguments" "$SLURM_ARGS")"
-        fi
-        echo >"$TTY"
-    fi
-
-    if [ -z "$F_RC" ]; then
-        printf '%s6. Shell integration%s  %s(adds cvenv to PATH and enables `cvenv activate`)%s\n' "$B" "$R" "$DIM" "$R" >"$TTY"
-        if ask_yn "Add the cvenv block to your shell rc?" "$([ "$MODIFY_RC" = yes ] && echo y || echo n)"; then
-            MODIFY_RC=yes
-            [ -z "$F_RCFILE" ] && RCFILE="$(expand_path "$(ask_value "Shell rc file" "$RCFILE")")"
-        else
-            MODIFY_RC=no
-        fi
-        echo >"$TTY"
-    fi
-}
-
-summary() {
-    local src
-    case "$SOURCE" in
-        download) src="download ${VERSION} from github.com/${REPO_SLUG:-?}${URL:+ ($URL)}" ;;
-        url) src="download $URL" ;;
-        source) src="build from source ($SRC_DIR, pixi run build)" ;;
-        binary) src="copy $BINARY" ;;
-        keep) src="keep the installed binary" ;;
-    esac
-    printf '%sSummary%s\n' "$B" "$R" >&2
-    printf '  %-22s %s\n' \
-        "install prefix" "$PREFIX" \
-        "cvenv binary" "$src" \
-        "pixi" "$([ "$INSTALL_PIXI" = 1 ] && echo "install to ~/.pixi/bin" || echo "${PIXI:-(none)}")" \
-        "apptainer" "${APPT:-(none)}" \
-        "squashfuse" "$([ "$INSTALL_SQFS" = 1 ] && echo "fetch into $PREFIX/opt/squashfuse" || echo "${SQFS:-(none)}")" \
-        "backend" "$BACKEND" \
-        "env store" "$STORE" \
-        "build scratch" "$BUILD_TMP" >&2
-    if [ "$HAS_SLURM" = 1 ] || [ "$MODE" = slurm ] || [ -n "$SLURM_ARGS" ]; then
-        printf '  %-22s %s\n' "rebuild mode" "$MODE" "sbatch arguments" "${SLURM_ARGS:-(none)}" >&2
-    fi
-    printf '  %-22s %s\n' "shell rc" "$([ "$MODIFY_RC" = yes ] && echo "add/update block in $RCFILE" || echo "leave alone")" >&2
-}
-
-validate() {
-    case "$SOURCE" in
-        download) [ -n "$URL" ] || [ -n "$REPO_SLUG" ] || { warn "no GitHub repo given for the download"; return 1; }
-                  [ -n "$URL" ] || [ -n "$TRIPLE" ] || { warn "no prebuilt binary for $(uname -m); build from source"; return 1; } ;;
-        binary) [ -f "$BINARY" ] || { warn "binary not found: $BINARY"; return 1; } ;;
-        source) [ "$IN_CHECKOUT" = 1 ] || { warn "building from source needs a git checkout"; return 1; } ;;
-        keep) [ -x "$PREFIX/bin/cvenv" ] || { warn "no installed binary in $PREFIX/bin"; return 1; } ;;
-    esac
-    [ "$INSTALL_PIXI" = 1 ] || [ -x "$PIXI" ] || { warn "pixi executable not found: ${PIXI:-(none)}"; return 1; }
-    if [ -n "$APPT" ] && [ ! -x "$APPT" ]; then warn "apptainer not executable: $APPT"; return 1; fi
-    if [ -n "$SQFS" ] && [ "$INSTALL_SQFS" = 0 ] && [ ! -x "$SQFS" ]; then warn "squashfuse not executable: $SQFS"; return 1; fi
-    if [ -z "$APPT" ] && [ -z "$SQFS" ] && [ "$INSTALL_SQFS" = 0 ]; then
-        warn "neither apptainer nor squashfuse: envs can't be built or run until one is installed"
-    fi
-    mkdir -p "$BUILD_TMP" 2>/dev/null && [ -w "$BUILD_TMP" ] || { warn "build scratch not writable: $BUILD_TMP"; return 1; }
-    return 0
-}
-
-if [ "$HEADLESS" = 1 ]; then
-    echo >&2; summary
-    if ! validate; then
-        fail "cannot continue headless; fix the flags above (e.g. --repo OWNER/NAME, --from-source, --binary PATH)"
-    fi
+# what builds will use
+if [ "$BACKEND" = apptainer ] || { [ "$BACKEND" = auto ] && [ -n "$APPT" ]; }; then
+    USES=apptainer
+elif [ -n "$SQFS" ] || [ "$INSTALL_SQFS" = 1 ]; then
+    USES=squashfuse
 else
-    while true; do
-        wizard
-        summary
-        if ! validate; then
-            ask_yn "Some answers need fixing. Go through the questions again?" y && { echo >"$TTY"; continue; }
-            fail "aborted"
-        fi
-        echo >"$TTY"
-        a="$(ask_choice "Proceed?" yes "yes|install with these settings" "edit|go through the questions again" "abort|quit without changing anything")"
-        case "$a" in
-            yes) break ;;
-            edit) echo >"$TTY" ;;
-            abort) echo "aborted; nothing was changed" >&2; exit 1 ;;
-        esac
-    done
+    USES=none
+fi
+
+# fail early on impossible flag combinations
+case "$SOURCE" in
+    download) [ -n "$REPO_SLUG" ] || fail "no GitHub repo for the download (--repo OWNER/NAME)"
+              [ -n "$TRIPLE" ] || [ "$IN_CHECKOUT" = 1 ] || fail "no prebuilt binary for $(uname -m); use --from-source in a checkout" ;;
+    binary) [ -f "$BINARY" ] || fail "binary not found: $BINARY" ;;
+    source) [ "$IN_CHECKOUT" = 1 ] || fail "--from-source needs a git checkout of cvenv" ;;
+    keep) [ -n "$INSTALLED" ] || fail "--keep-binary: no working cvenv in $PREFIX/bin" ;;
+esac
+[ -z "$APPT" ] || [ -x "$APPT" ] || fail "apptainer not executable: $APPT"
+[ -z "$SQFS" ] || [ -x "$SQFS" ] || fail "squashfuse not executable: $SQFS"
+mkdir -p "$BUILD_TMP" 2>/dev/null && [ -w "$BUILD_TMP" ] || fail "build scratch not writable: $BUILD_TMP (--build-tmpdir DIR)"
+
+# ---------------------------------------------------------------- what we found
+printf '%scvenv installer%s\n' "$B" "$R" >&2
+section "Detected"
+if [ -n "$PIXI" ]; then found pixi "$(tildify "$PIXI") ($("$PIXI" --version 2>/dev/null | awk '{print $2}'))"; else missing pixi "not found (will be installed to ~/.pixi/bin)"; fi
+if [ -n "$APPT" ]; then found apptainer "$APPT"; else missing apptainer "not found"; fi
+if [ -n "$SQFS" ]; then found squashfuse "$(tildify "$SQFS")"
+elif [ "$INSTALL_SQFS" = 1 ]; then missing squashfuse "not found (will be fetched, no root needed)"
+else missing squashfuse "not found"; fi
+if [ "$HAS_SLURM" = 1 ]; then found Slurm "$(command -v sbatch)"; fi
+case "$USES" in
+    apptainer) found backend "apptainer$([ "$BACKEND" = auto ] && echo " (auto)")" ;;
+    squashfuse) found backend "squashfuse$([ "$BACKEND" = auto ] && echo " (auto: no Apptainer)")" ;;
+    none) warn "no backend: install Apptainer, or squashfuse with FUSE, to build envs" ;;
+esac
+[ -n "$INSTALLED" ] && found installed "$(tildify "$PREFIX/bin/cvenv") ($INSTALLED)"
+
+# ---------------------------------------------------------------- the three questions
+if [ "$YES" = 0 ]; then
+    echo >"$TTY"
+    [ -n "$F_STORE" ] || STORE="$(expand_path "$(ask_value "Where should envs be stored?" "$(tildify "$STORE")")")"
+    if [ "$HAS_SLURM" = 1 ] && [ "$F_SLURM_SET" = 0 ]; then
+        SLURM_ARGS="$(ask_value "sbatch arguments for build jobs (e.g. -A acct -p part)" "$SLURM_ARGS")"
+    fi
+    if [ "$MODIFY_RC" = ask ]; then
+        if ask_yn "$([ "$RC_HAS_BLOCK" = 1 ] && echo Update || echo Add) cvenv in $(tildify "$RCFILE")?" y; then MODIFY_RC=yes; else MODIFY_RC=no; fi
+    fi
+fi
+[ -n "$STORE" ] || fail "the env store can't be empty"
+
+# ---------------------------------------------------------------- plan
+case "$SOURCE" in
+    download) SRC_DESC="$([ "$VERSION" = latest ] && echo "latest release" || echo "release $VERSION")$([ "$REPO_SLUG" = "$DEFAULT_GITHUB_REPO" ] || echo " of $REPO_SLUG")" ;;
+    url) SRC_DESC="from $URL" ;;
+    binary) SRC_DESC="copy of $BINARY" ;;
+    source) SRC_DESC="built from this checkout" ;;
+    keep) SRC_DESC="keep $INSTALLED" ;;
+esac
+section "Plan"
+row install "$(tildify "$PREFIX/bin/cvenv") ($SRC_DESC)"
+[ "$INSTALL_PIXI" = 1 ] && row pixi "install to ~/.pixi/bin"
+[ "$INSTALL_SQFS" = 1 ] && row squashfuse "fetch into $(tildify "$PREFIX/opt/squashfuse")"
+row store "$(tildify "$STORE")"
+if [ "$HAS_SLURM" = 1 ] || [ "$MODE" = slurm ] || [ -n "$SLURM_ARGS" ]; then
+    if [ "$MODE" = slurm ]; then row slurm "builds run as jobs: sbatch ${SLURM_ARGS:-(no extra arguments)}"
+    else row slurm "\`cvenv rebuild --slurm\` uses: sbatch ${SLURM_ARGS:-(no extra arguments)}"; fi
+fi
+case "$MODIFY_RC" in
+    yes) row "shell rc" "$([ "$RC_HAS_BLOCK" = 1 ] && echo update || echo add to) $(tildify "$RCFILE")" ;;
+    *) row "shell rc" "leave alone" ;;
+esac
+case "$(stat -f -c %T "$BUILD_TMP" 2>/dev/null || echo '?')" in
+    nfs*|gpfs|lustre|beegfs*|ceph*) warn "$BUILD_TMP is a shared filesystem: builds will be slow there (--build-tmpdir DIR)" ;;
+esac
+[ "$MODE" = slurm ] && [ -z "$SLURM_ARGS" ] && warn "builds run as Slurm jobs, but no sbatch arguments are set; your cluster may need -A/-p"
+
+if [ "$YES" = 0 ]; then
+    echo >"$TTY"
+    ask_yn "Proceed?" y || { echo "Nothing was changed." >&2; exit 1; }
 fi
 echo >&2
 
@@ -435,27 +314,22 @@ CONF="$PREFIX/etc/install.conf"
 # node-local scratch for every cache used below - never $HOME or the repo
 SCRATCH="$BUILD_TMP/cvenv-${USER:-$(id -u)}"
 mkdir -p "$SCRATCH" && chmod 700 "$SCRATCH"
-fstype="$(stat -f -c %T "$BUILD_TMP" 2>/dev/null || echo '?')"
-case "$fstype" in
-    nfs*|gpfs|lustre|beegfs*|ceph*) warn "$BUILD_TMP is a shared filesystem ($fstype); builds will be slow and create many files there" ;;
-esac
 export PIXI_CACHE_DIR="${PIXI_CACHE_DIR:-$SCRATCH/pixi-cache}"
 export CVENV_BUILD_TMPDIR="$BUILD_TMP"
 
 if [ "$INSTALL_PIXI" = 1 ]; then
-    say "Installing pixi"
+    step "Installing pixi"
     command -v curl >/dev/null || fail "curl is needed to install pixi"
-    curl -fsSL https://pixi.sh/install.sh | PIXI_NO_PATH_UPDATE=1 bash
+    curl -fsSL https://pixi.sh/install.sh | PIXI_NO_PATH_UPDATE=1 bash >/dev/null
     PIXI="${PIXI_HOME:-$HOME/.pixi}/bin/pixi"
     [ -x "$PIXI" ] || fail "pixi installation failed"
-    ok "$PIXI ($("$PIXI" --version))"
 fi
 PIXI="$(readlink -f "$PIXI")"
 
 if [ "$INSTALL_SQFS" = 1 ]; then
-    # Unpack the distro's squashfuse (+ the libraries this machine lacks) into the prefix:
-    # `apt-get download` and `dpkg-deb -x` need no root. cvenv sets LD_LIBRARY_PATH for it.
-    say "Fetching squashfuse"
+    # The distro's squashfuse plus the libraries this machine lacks, unpacked into the
+    # prefix: `apt-get download` and `dpkg-deb -x` need no root (cvenv sets LD_LIBRARY_PATH).
+    step "Fetching squashfuse"
     SQ_DIR="$PREFIX/opt/squashfuse"
     sq_tmp="$(mktemp -d "$SCRATCH/squashfuse-XXXXXX")"
     sq_pkgs="squashfuse"
@@ -470,30 +344,33 @@ if [ "$INSTALL_SQFS" = 1 ]; then
     triple="$(uname -m)-linux-gnu"
     sq_out="$(LD_LIBRARY_PATH="$SQ_DIR/usr/lib/$triple:$SQ_DIR/lib/$triple${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$SQFS" --help 2>&1 || true)"
     case "$sq_out" in *squashfuse*) ;; *) fail "the fetched squashfuse does not run ($SQFS): $sq_out" ;; esac
-    ok "$SQFS ($sq_pkgs)"
 fi
 
-say "Installing the cvenv binary"
 install_bin() {  # install_bin FILE
     chmod 755 "$1"
     "$1" --version >/dev/null 2>&1 || { rm -f "$1"; fail "$1 does not run on this machine"; }
     mv -f "$1" "$CVENV"
 }
+build_from_source() {
+    # The Rust toolchain comes from the checkout's pixi.toml. Its env is detached to
+    # node-local scratch (thousands of files); only the final binary lands in bin/.
+    ( cd "$SRC_DIR" && "$PIXI" config set --local detached-environments "$SCRATCH/pixi-envs" >/dev/null )
+    ( cd "$SRC_DIR" && "$PIXI" run build >&2 ) || fail "building cvenv failed"
+    if [ "$(readlink -f "$SRC_DIR/bin/cvenv")" != "$(readlink -f "$CVENV" 2>/dev/null || echo x)" ]; then
+        cp "$SRC_DIR/bin/cvenv" "$CVENV.new" && install_bin "$CVENV.new"
+    fi
+}
 case "$SOURCE" in
     source)
-        # The Rust toolchain comes from the checkout's pixi.toml. Its env is detached to
-        # node-local scratch (thousands of files); only the final binary lands in bin/.
-        ( cd "$SRC_DIR" && "$PIXI" config set --local detached-environments "$SCRATCH/pixi-envs" >/dev/null )
-        note "toolchain env: $SCRATCH/pixi-envs, caches: $SCRATCH"
-        ( cd "$SRC_DIR" && "$PIXI" run build ) || fail "building cvenv failed"
-        if [ "$(readlink -f "$SRC_DIR/bin/cvenv")" != "$(readlink -f "$CVENV" 2>/dev/null || echo x)" ]; then
-            cp "$SRC_DIR/bin/cvenv" "$CVENV.new" && install_bin "$CVENV.new"
-        fi ;;
+        step "Building cvenv from source"
+        build_from_source ;;
     binary)
+        step "Installing cvenv"
         cp "$BINARY" "$CVENV.new" && install_bin "$CVENV.new" ;;
     keep)
         "$CVENV" --version >/dev/null 2>&1 || fail "$CVENV does not run" ;;
     download|url)
+        step "Downloading cvenv"
         if [ -z "$URL" ]; then
             if [ "$VERSION" = latest ]; then
                 URL="https://github.com/$REPO_SLUG/releases/latest/download/cvenv-$TRIPLE"
@@ -501,27 +378,32 @@ case "$SOURCE" in
                 URL="https://github.com/$REPO_SLUG/releases/download/$VERSION/cvenv-$TRIPLE"
             fi
         fi
-        note "downloading $URL"
-        fetch "$URL" "$CVENV.new" || { rm -f "$CVENV.new"; fail "download failed ($URL). No release yet? Re-run and build from source."; }
-        if fetch "$URL.sha256" "$CVENV.sha256" 2>/dev/null; then
-            want="$(awk '{print $1}' "$CVENV.sha256")"; got="$(sha256sum "$CVENV.new" | awk '{print $1}')"
-            rm -f "$CVENV.sha256"
-            [ "$want" = "$got" ] || { rm -f "$CVENV.new"; fail "checksum mismatch for $URL"; }
-            ok "checksum verified"
+        if [ -n "$TRIPLE$F_URL" ] && fetch "$URL" "$CVENV.new" 2>/dev/null; then
+            if fetch "$URL.sha256" "$CVENV.sha256" 2>/dev/null; then
+                want="$(awk '{print $1}' "$CVENV.sha256")"; got="$(sha256sum "$CVENV.new" | awk '{print $1}')"
+                rm -f "$CVENV.sha256"
+                [ "$want" = "$got" ] || { rm -f "$CVENV.new"; fail "checksum mismatch for $URL"; }
+            else
+                warn "no checksum published next to the binary; skipped verification"
+            fi
+            install_bin "$CVENV.new"
+        elif [ "$SOURCE" = download ] && [ -z "$F_SOURCE$F_VERSION$F_REPO" ] && [ "$IN_CHECKOUT" = 1 ]; then
+            rm -f "$CVENV.new"
+            warn "download failed ($URL); building from this checkout instead"
+            build_from_source
         else
-            warn "no checksum published next to the binary; skipped verification"
-        fi
-        install_bin "$CVENV.new" ;;
+            rm -f "$CVENV.new"
+            fail "download failed ($URL)"
+        fi ;;
 esac
-ok "$CVENV ($("$CVENV" --version))"
 
-say "Writing settings"
+step "Saving settings"
 APPT_CONF=""
 if [ -n "$APPT" ]; then
     APPT_CONF="$("$APPT" buildcfg 2>/dev/null | sed -n 's/^\(APPTAINER\|SINGULARITY\)_CONF_FILE=//p' | head -n1 || true)"
     [ -n "$APPT_CONF" ] && [ -f "$APPT_CONF" ] || APPT_CONF=""
     n="$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)"
-    [ "$n" -gt 0 ] 2>/dev/null || warn "user namespaces look disabled: image builds may need fakeroot/subuid setup or a build node"
+    [ "$n" -gt 0 ] 2>/dev/null || warn "user namespaces look disabled: Apptainer builds may need fakeroot or --backend squashfuse"
 fi
 cat > "$CONF" <<EOF
 # Written by installation.sh on $(hostname) at $(date). Machine-local; do not commit.
@@ -532,27 +414,28 @@ export CVENV_INSTALL_APPTAINER_CONF=$(printf '%q' "$APPT_CONF")
 export CVENV_INSTALL_SQUASHFUSE=$(printf '%q' "$SQFS")
 export CVENV_INSTALL_BUILD_TMPDIR=$(printf '%q' "$BUILD_TMP")
 EOF
-ok "machine settings: $CONF"
-# user settings (stored in the cvenv config; flags/answers above win over old values)
 cfg() {  # cfg set|unset KEY [VALUE] - quiet unless it fails
     local out
     out="$("$CVENV" config "$@" 2>&1)" || fail "cvenv config $*: $out"
 }
-cfg set store "$STORE" && ok "store = $STORE"
+cfg set store "$STORE"
 mkdir -p "$STORE"
-cfg set rebuild-mode "$MODE" && ok "rebuild-mode = $MODE"
-if [ "$BACKEND" = auto ]; then cfg unset backend; else cfg set backend "$BACKEND"; fi
-ok "backend = $BACKEND"
-if [ -n "$SLURM_ARGS" ]; then
-    cfg set slurm-args "$SLURM_ARGS" && ok "slurm-args = $SLURM_ARGS"
-else
-    cfg unset slurm-args
-    [ "$MODE" = slurm ] && warn "rebuild-mode is slurm but no sbatch arguments are set; your cluster may require -A/-p"
+cfg set rebuild-mode "$MODE"
+if [ -n "$SLURM_ARGS" ]; then cfg set slurm-args "$SLURM_ARGS"; else cfg unset slurm-args; fi
+# settings newer than the installed binary (e.g. an older release) are skipped
+supports() { "$CVENV" config get "$1" >/dev/null 2>&1; }
+if supports backend; then
+    if [ "$BACKEND" = auto ]; then cfg unset backend; else cfg set backend "$BACKEND"; fi
+elif [ "$BACKEND" != auto ]; then
+    warn "$("$CVENV" --version) has no 'backend' setting; --backend $BACKEND was not saved"
+fi
+if [ "$USES" = squashfuse ] && ! supports squashfuse; then
+    warn "$("$CVENV" --version) predates the squashfuse backend, so it can't build envs here."
+    warn "Install a newer release, or build from a checkout: ./installation.sh --from-source"
 fi
 # an explicit build-tmpdir in the user config would shadow install.conf: keep them in sync
 if [ -n "$(cfg_get build-tmpdir)" ]; then cfg set build-tmpdir "$BUILD_TMP"; fi
 
-say "Shell integration"
 BLOCK_START="# >>> cvenv >>>"
 BLOCK_END="# <<< cvenv <<<"
 block="$BLOCK_START
@@ -560,6 +443,7 @@ export PATH=\"$PREFIX/bin:\$PATH\"
 eval \"\$(\"$CVENV\" shell-init)\"
 $BLOCK_END"
 if [ "$MODIFY_RC" = yes ]; then
+    step "Setting up $(tildify "$RCFILE")"
     touch "$RCFILE"
     if grep -qF "$BLOCK_START" "$RCFILE"; then
         # replace the existing block (the install may have moved)
@@ -567,17 +451,22 @@ if [ "$MODIFY_RC" = yes ]; then
         awk -v s="$BLOCK_START" -v e="$BLOCK_END" '$0==s{skip=1} !skip{print} $0==e{skip=0}' "$RCFILE" > "$tmp"
         printf '%s\n' "$block" >> "$tmp"
         cat "$tmp" > "$RCFILE"; rm -f "$tmp"
-        ok "updated the cvenv block in $RCFILE"
     else
         printf '\n%s\n' "$block" >> "$RCFILE"
-        ok "added a cvenv block to $RCFILE"
     fi
-    note "open a new shell (or \`source $RCFILE\`) to start using it"
-else
-    note "shell rc left alone. To use cvenv, add this to your shell rc:"
-    printf '%s\n' "$block" | sed 's/^/        /' >&2
 fi
 
-say "Done"
-env -u CVENV_BUILD_TMPDIR -u PIXI_CACHE_DIR "$CVENV" config | sed 's/^/    /' >&2
-printf '\n  Get started:  cvenv init myenv python=3.12 numpy  &&  cvenv activate myenv  &&  cvenv rebuild\n' >&2
+# ---------------------------------------------------------------- done
+printf '\n%s%s is installed.%s\n\n' "$B" "$("$CVENV" --version)" "$R" >&2
+if [ "$MODIFY_RC" = yes ]; then
+    printf '  Open a new shell (or run: source %s), then:\n' "$(tildify "$RCFILE")" >&2
+else
+    printf '  Add this to your shell rc to use cvenv:\n\n%s\n\n  Then:\n' "$(printf '%s\n' "$block" | sed 's/^/    /')" >&2
+fi
+cat >&2 <<'EOF'
+    cvenv init myenv python=3.12 numpy
+    cvenv rebuild --env myenv
+    cvenv run --env myenv python
+
+  Settings: cvenv config    Help: cvenv --help
+EOF
