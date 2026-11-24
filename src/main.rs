@@ -20,12 +20,18 @@ mod wrap;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use env::{env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry, valid_name, warn_if_stale, Backend, Env, Kind, Record, SHIM_LINK};
+use env::{
+    env_for_shim_dir, find_manifest, load_registry, resolve_env, staleness, update_registry,
+    valid_name, warn_if_stale, Backend, Env, Kind, Record, SHIM_LINK,
+};
 use runtime::{exec_in_container, find_pixi, gpu_flags, IMG_PIXI};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use util::{die, expand, human_size, info, is_under, now_iso, remove_tree, stdin_is_tty, stdout_is_tty, warn};
+use util::{
+    die, expand, human_size, info, is_under, now_iso, remove_tree, stdin_is_tty, stdout_is_tty,
+    warn,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Usage guide for AI agents, compiled into the binary (`cvenv agent-guide`).
@@ -309,33 +315,97 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Some("exec") => return cmd_run(&argv[1..], true),
         Some("shell") => return cmd_shell(&argv[1..]),
         Some("self") if argv.get(1).map(String::as_str) == Some("update") => {
-            let rest: Vec<String> = std::iter::once("self-update".to_string()).chain(argv[2..].iter().cloned()).collect();
+            let rest: Vec<String> = std::iter::once("self-update".to_string())
+                .chain(argv[2..].iter().cloned())
+                .collect();
             return dispatch(&rest);
         }
         _ => {}
     }
     let cli = Cli::parse_from(std::iter::once("cvenv".to_string()).chain(argv.iter().cloned()));
     match cli.cmd {
-        Cmd::Init { name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages } => {
-            cmd_init(&name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages)
-        }
-        Cmd::Wrap { name, image, path, link, bin_dir, command } => {
-            wrap::cmd_wrap(&name, &image, path, wrap::WrapOpts { link, bin_dirs: bin_dir, commands: command })
-        }
-        Cmd::WrapInstall { name, dir, path, base_image, bin_dir, replace, backend } => {
-            wrap::cmd_wrap_install(&name, &dir, path, wrap::InstallOpts { base_image, bin_dirs: bin_dir, replace, backend })
-        }
+        Cmd::Init {
+            name,
+            path,
+            manifest,
+            pixi_env,
+            channel,
+            platform,
+            cuda,
+            import,
+            python,
+            packages,
+        } => cmd_init(
+            &name, path, manifest, pixi_env, channel, platform, cuda, import, python, packages,
+        ),
+        Cmd::Wrap {
+            name,
+            image,
+            path,
+            link,
+            bin_dir,
+            command,
+        } => wrap::cmd_wrap(
+            &name,
+            &image,
+            path,
+            wrap::WrapOpts {
+                link,
+                bin_dirs: bin_dir,
+                commands: command,
+            },
+        ),
+        Cmd::WrapInstall {
+            name,
+            dir,
+            path,
+            base_image,
+            bin_dir,
+            replace,
+            backend,
+        } => wrap::cmd_wrap_install(
+            &name,
+            &dir,
+            path,
+            wrap::InstallOpts {
+                base_image,
+                bin_dirs: bin_dir,
+                replace,
+                backend,
+            },
+        ),
         Cmd::Register { path, name } => cmd_register(&path, name.as_deref()),
         Cmd::Share { env, world, group } => cmd_share(&env, world, group.as_deref()),
         Cmd::Envs => cmd_envs(),
         Cmd::Info { env } => cmd_info(env.as_deref()),
-        Cmd::Rebuild { env, update, no_cache, slurm, local, slurm_args, wait, incremental, backend, keep_build_dir } => {
+        Cmd::Rebuild {
+            env,
+            update,
+            no_cache,
+            slurm,
+            local,
+            slurm_args,
+            wait,
+            incremental,
+            backend,
+            keep_build_dir,
+        } => {
             let e = resolve_env(env.as_deref(), true, true)?;
-            let mode_slurm = config::value("rebuild-mode").map(|m| m.trim().eq_ignore_ascii_case("slurm")).unwrap_or(false);
+            let mode_slurm = config::value("rebuild-mode")
+                .map(|m| m.trim().eq_ignore_ascii_case("slurm"))
+                .unwrap_or(false);
             // inside a Slurm job (e.g. the submitted build itself) always build locally
             let in_job = std::env::var_os("SLURM_JOB_ID").is_some();
             if slurm || (mode_slurm && !local && !in_job) {
-                build::submit_slurm(&e, update, no_cache, incremental, backend, slurm_args.as_deref(), wait)
+                build::submit_slurm(
+                    &e,
+                    update,
+                    no_cache,
+                    incremental,
+                    backend,
+                    slurm_args.as_deref(),
+                    wait,
+                )
             } else {
                 if !in_job && !local && util::which("sbatch").is_some() {
                     info("building on this node; for heavy envs use `cvenv rebuild --slurm` (or `cvenv config set rebuild-mode slurm`)");
@@ -347,8 +417,14 @@ fn dispatch(argv: &[String]) -> Result<()> {
         Cmd::Deactivate => cmd_deactivate(),
         Cmd::Move { name, dest } => cmd_move(&name, &dest),
         Cmd::Unregister { name, delete, yes } => cmd_unregister(&name, delete, yes),
-        Cmd::Config { action, key, value } => cmd_config(action.as_deref(), key.as_deref(), value.as_deref()),
-        Cmd::SelfUpdate { check, version, force } => update::self_update(check, version, force),
+        Cmd::Config { action, key, value } => {
+            cmd_config(action.as_deref(), key.as_deref(), value.as_deref())
+        }
+        Cmd::SelfUpdate {
+            check,
+            version,
+            force,
+        } => update::self_update(check, version, force),
         Cmd::ShellInit { .. } => {
             print!("{}", runtime::shell_init());
             Ok(())
@@ -361,16 +437,32 @@ fn dispatch(argv: &[String]) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn is_pip(prog: &str) -> bool {
-    prog == "pip" || prog == "pip3" || prog.strip_prefix("pip3.").map(|v| v.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
+    prog == "pip"
+        || prog == "pip3"
+        || prog
+            .strip_prefix("pip3.")
+            .map(|v| v.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false)
 }
 
 fn shim_main(shim_dir: &Path, prog: &str, args: &[String]) -> Result<()> {
     let env = match env_for_shim_dir(shim_dir) {
         Some(e) => e,
-        None => bail!("{}: the env owning {} is not registered (moved or unregistered?)", prog, shim_dir.display()),
+        None => bail!(
+            "{}: the env owning {} is not registered (moved or unregistered?)",
+            prog,
+            shim_dir.display()
+        ),
     };
-    if is_pip(prog) && args.first().map(|a| a == "install").unwrap_or(false) && std::env::var_os("CVENV_ALLOW_PIP").is_none() {
-        let pkgs: Vec<&str> = args[1..].iter().map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+    if is_pip(prog)
+        && args.first().map(|a| a == "install").unwrap_or(false)
+        && std::env::var_os("CVENV_ALLOW_PIP").is_none()
+    {
+        let pkgs: Vec<&str> = args[1..]
+            .iter()
+            .map(String::as_str)
+            .filter(|a| !a.starts_with('-'))
+            .collect();
         bail!(
             "`pip install` cannot modify the read-only image (and would litter ~/.local).\n    \
              Use `cvenv add --pypi {}` and then `{}`.\n    (set CVENV_ALLOW_PIP=1 to run pip anyway)",
@@ -379,9 +471,18 @@ fn shim_main(shim_dir: &Path, prog: &str, args: &[String]) -> Result<()> {
         );
     }
     if !env.built() {
-        bail!("env '{}' has not been built yet - run `{}`", env.name, env.rebuild_hint());
+        bail!(
+            "env '{}' has not been built yet - run `{}`",
+            env.name,
+            env.rebuild_hint()
+        );
     }
-    if (prog == "pip" || prog == "pip3") && !env.meta().map(|m| m.bins.iter().any(|b| b == prog)).unwrap_or(false) {
+    if (prog == "pip" || prog == "pip3")
+        && !env
+            .meta()
+            .map(|m| m.bins.iter().any(|b| b == prog))
+            .unwrap_or(false)
+    {
         bail!(
             "env '{}' has no {}. Add packages with `cvenv add --pypi PKG` (or `cvenv add pip`), then `{}`",
             env.name,
@@ -413,13 +514,18 @@ fn cmd_init(
     packages: Vec<String>,
 ) -> Result<()> {
     if !valid_name(name) {
-        bail!("invalid env name '{}' (use letters, digits, '.', '_' and '-')", name);
+        bail!(
+            "invalid env name '{}' (use letters, digits, '.', '_' and '-')",
+            name
+        );
     }
     let reg = load_registry();
     if let Some(r) = reg.envs.get(name) {
         bail!("env '{}' already exists at {}", name, r.path.display());
     }
-    let path = path.map(|p| expand(&p)).unwrap_or_else(|| config::store_dir().join(name));
+    let path = path
+        .map(|p| expand(&p))
+        .unwrap_or_else(|| config::store_dir().join(name));
     for (n, r) in &reg.envs {
         if util::normalize(&r.path) == util::normalize(&path) {
             bail!("{} is already used by env '{}'", path.display(), n);
@@ -435,18 +541,34 @@ fn cmd_init(
             bail!("--import and --manifest can't be combined");
         }
         if path.is_dir() && find_manifest(&path).is_some() {
-            bail!("{} already has a manifest; --import needs a new env directory", path.display());
+            bail!(
+                "{} already has a manifest; --import needs a new env directory",
+                path.display()
+            );
         }
     }
     let import_kind = import.as_ref().map(|f| {
-        let n = f.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-        if n.ends_with(".yml") || n.ends_with(".yaml") { "conda" } else { "pip" }
+        let n = f
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        if n.ends_with(".yml") || n.ends_with(".yaml") {
+            "conda"
+        } else {
+            "pip"
+        }
     });
     let (manifest, created) = if let Some(m) = manifest {
-        let mf = find_manifest(Path::new(&m)).ok_or_else(|| anyhow::anyhow!("no pixi.toml/pyproject.toml found at {}", m))?;
+        let mf = find_manifest(Path::new(&m))
+            .ok_or_else(|| anyhow::anyhow!("no pixi.toml/pyproject.toml found at {}", m))?;
         fs::create_dir_all(&path)?;
         (mf, false)
-    } else if let Some(mf) = if path.is_dir() { find_manifest(&path) } else { None } {
+    } else if let Some(mf) = if path.is_dir() {
+        find_manifest(&path)
+    } else {
+        None
+    } {
         info(&format!("using existing manifest {}", mf.display()));
         (mf, false)
     } else {
@@ -461,8 +583,16 @@ fn cmd_init(
         } else {
             cmd.args(["--format", "pixi"]);
         }
-        let channels = if channels.is_empty() && import_kind != Some("conda") { vec!["conda-forge".to_string()] } else { channels };
-        let platforms = if platforms.is_empty() { vec!["linux-64".to_string()] } else { platforms };
+        let channels = if channels.is_empty() && import_kind != Some("conda") {
+            vec!["conda-forge".to_string()]
+        } else {
+            channels
+        };
+        let platforms = if platforms.is_empty() {
+            vec!["linux-64".to_string()]
+        } else {
+            platforms
+        };
         for c in &channels {
             cmd.args(["-c", c]);
         }
@@ -491,8 +621,18 @@ fn cmd_init(
     let gi = manifest.parent().unwrap_or(&path).join(".gitignore");
     let existing = fs::read_to_string(&gi).unwrap_or_default();
     if is_under(&manifest, &path) && !existing.split_whitespace().any(|l| l == ".cvenv/") {
-        let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
-        let _ = fs::write(&gi, format!("{}{}# cvenv images, shims and logs\n.cvenv/\n", existing, sep));
+        let sep = if existing.is_empty() || existing.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let _ = fs::write(
+            &gi,
+            format!(
+                "{}{}# cvenv images, shims and logs\n.cvenv/\n",
+                existing, sep
+            ),
+        );
     }
 
     let rec = Record {
@@ -504,8 +644,18 @@ fn cmd_init(
     };
     let env = Env::new(name, &rec);
     if let Some(pe) = &pixi_env {
-        if pe != "default" && env.pixi_table().get("environments").and_then(|e| e.get(pe)).is_none() {
-            warn(&format!("pixi environment '{}' is not defined in {} (yet)", pe, manifest.display()));
+        if pe != "default"
+            && env
+                .pixi_table()
+                .get("environments")
+                .and_then(|e| e.get(pe))
+                .is_none()
+        {
+            warn(&format!(
+                "pixi environment '{}' is not defined in {} (yet)",
+                pe,
+                manifest.display()
+            ));
         }
     }
     update_registry(|r| {
@@ -517,7 +667,11 @@ fn cmd_init(
     env.write_env_file()?;
 
     if import_kind == Some("pip") {
-        import_requirements(&manifest, import.as_ref().unwrap(), python.as_deref().unwrap_or("3.12"))?;
+        import_requirements(
+            &manifest,
+            import.as_ref().unwrap(),
+            python.as_deref().unwrap_or("3.12"),
+        )?;
     } else if python.is_some() {
         warn("--python only applies to --import requirements.txt; use `cvenv add python=X.Y`");
     }
@@ -531,13 +685,20 @@ fn cmd_init(
             .status()?
             .success();
         if !ok {
-            warn(&format!("adding packages failed; edit {} by hand", manifest.display()));
+            warn(&format!(
+                "adding packages failed; edit {} by hand",
+                manifest.display()
+            ));
         }
     } else if !packages.is_empty() {
         warn("packages are only added to newly created manifests; use `cvenv add`");
     }
     if let Some(f) = &import {
-        info(&format!("imported {} into {}", f.display(), manifest.display()));
+        info(&format!(
+            "imported {} into {}",
+            f.display(),
+            manifest.display()
+        ));
     }
     info(&format!("created env '{}' in {}", name, path.display()));
     println!(
@@ -551,7 +712,10 @@ fn cmd_init(
 fn cmd_envs() -> Result<()> {
     let reg = load_registry();
     if reg.envs.is_empty() {
-        println!("no envs registered (create one with `cvenv init NAME`). store: {}", config::store_dir().display());
+        println!(
+            "no envs registered (create one with `cvenv init NAME`). store: {}",
+            config::store_dir().display()
+        );
         return Ok(());
     }
     let active = std::env::var("CVENV_ACTIVE").unwrap_or_default();
@@ -559,7 +723,15 @@ fn cmd_envs() -> Result<()> {
     for (n, rec) in &reg.envs {
         let e = Env::new(n, rec);
         let status = if let Some((job, state)) = build::slurm_build_state(&e) {
-            format!("{} (job {})", if state == "PENDING" { "queued" } else { "building" }, job)
+            format!(
+                "{} (job {})",
+                if state == "PENDING" {
+                    "queued"
+                } else {
+                    "building"
+                },
+                job
+            )
         } else if build::is_building(&e) {
             "building".to_string()
         } else if e.is_pixi() && !e.manifest.is_file() {
@@ -568,22 +740,61 @@ fn cmd_envs() -> Result<()> {
             "not built".to_string()
         } else {
             let s = staleness(&e);
-            if s.changed { "stale" } else if s.moved { "moved" } else { "ok" }.to_string()
+            if s.changed {
+                "stale"
+            } else if s.moved {
+                "moved"
+            } else {
+                "ok"
+            }
+            .to_string()
         };
-        let size = if e.built() { human_size(fs::metadata(e.image())?.len()) } else { "-".into() };
+        let size = if e.built() {
+            human_size(fs::metadata(e.image())?.len())
+        } else {
+            "-".into()
+        };
         let size = if e.kind == Kind::WrapInstall {
             e.meta().map(|m| human_size(m.image_size)).unwrap_or(size)
         } else {
             size
         };
         let backend = if e.built() { e.backend().label() } else { "-" };
-        rows.push((if *n == active { "*" } else { " " }, n.clone(), e.kind.label(), backend, status, size, e.path.display().to_string()));
+        rows.push((
+            if *n == active { "*" } else { " " },
+            n.clone(),
+            e.kind.label(),
+            backend,
+            status,
+            size,
+            e.path.display().to_string(),
+        ));
     }
     let w1 = rows.iter().map(|r| r.1.len()).max().unwrap_or(4).max(4);
     let w4 = rows.iter().map(|r| r.4.len()).max().unwrap_or(6).max(6);
-    println!("  {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  PATH", "NAME", "KIND", "BACKEND", "STATUS", "SIZE", w1 = w1, w4 = w4);
+    println!(
+        "  {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  PATH",
+        "NAME",
+        "KIND",
+        "BACKEND",
+        "STATUS",
+        "SIZE",
+        w1 = w1,
+        w4 = w4
+    );
     for r in rows {
-        println!("{} {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  {}", r.0, r.1, r.2, r.3, r.4, r.5, r.6, w1 = w1, w4 = w4);
+        println!(
+            "{} {:<w1$}  {:<12}  {:<10}  {:<w4$}  {:>7}  {}",
+            r.0,
+            r.1,
+            r.2,
+            r.3,
+            r.4,
+            r.5,
+            r.6,
+            w1 = w1,
+            w4 = w4
+        );
     }
     Ok(())
 }
@@ -591,7 +802,16 @@ fn cmd_envs() -> Result<()> {
 fn cmd_info(name: Option<&str>) -> Result<()> {
     let e = resolve_env(name, true, true)?;
     let meta = e.meta();
-    println!("env         : {}{}{}", e.name, if e.is_active() { "  (active)" } else { "" }, if e.unregistered { "  (not in your registry)" } else { "" });
+    println!(
+        "env         : {}{}{}",
+        e.name,
+        if e.is_active() { "  (active)" } else { "" },
+        if e.unregistered {
+            "  (not in your registry)"
+        } else {
+            ""
+        }
+    );
     println!("kind        : {}", e.kind.label());
     println!("path        : {}", e.path.display());
     if e.is_pixi() {
@@ -601,10 +821,18 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
         println!("settings    : {}", e.manifest.display());
         if let Some(m) = &meta {
             if let Some(src) = &m.source {
-                println!("source      : {}{}", src, if m.link { "  (linked)" } else { "" });
+                println!(
+                    "source      : {}{}",
+                    src,
+                    if m.link { "  (linked)" } else { "" }
+                );
             }
             if let Some(ip) = &m.install_path {
-                println!("mounted at  : {}{}", ip.display(), if m.conda { "  (conda env)" } else { "" });
+                println!(
+                    "mounted at  : {}{}",
+                    ip.display(),
+                    if m.conda { "  (conda env)" } else { "" }
+                );
             }
         }
     }
@@ -612,16 +840,29 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
     if e.built() {
         println!("backend     : {}", e.backend().label());
     }
-    println!("image       : {}{}", e.image().display(), if e.built() { "" } else { "  (not built)" });
+    println!(
+        "image       : {}{}",
+        e.image().display(),
+        if e.built() { "" } else { "  (not built)" }
+    );
     if e.built() {
-        println!("image size  : {}", human_size(fs::metadata(e.image())?.len()));
+        println!(
+            "image size  : {}",
+            human_size(fs::metadata(e.image())?.len())
+        );
         if let Some(m) = &meta {
             println!("built at    : {} ({}s)", m.built_at, m.build_seconds);
             println!("base image  : {}", m.base_image);
             if squashfuse {
                 match squash::mount_point(&e) {
-                    Ok(Some(mp)) => println!("mount point : {}  ({} on this node)", mp.display(), squash::state(&mp).label()),
-                    Ok(None) => println!("mount point : none (the original tree is still in place)"),
+                    Ok(Some(mp)) => println!(
+                        "mount point : {}  ({} on this node)",
+                        mp.display(),
+                        squash::state(&mp).label()
+                    ),
+                    Ok(None) => {
+                        println!("mount point : none (the original tree is still in place)")
+                    }
                     Err(err) => println!("mount point : {:#}", err),
                 }
                 match squash::find_squashfuse() {
@@ -631,20 +872,47 @@ fn cmd_info(name: Option<&str>) -> Result<()> {
                 println!("host paths  : real paths under the mount point (mounted on demand by cvenv and the shims)");
             } else {
                 let hv = e.art().join(runtime::LAYER_DIR).is_dir() || e.kind == Kind::WrapInstall;
-                println!("host paths  : {}", if hv { "valid (sys.executable etc. point to paths that exist on the host)" } else { "image-internal (rebuild to enable host-valid paths)" });
+                println!(
+                    "host paths  : {}",
+                    if hv {
+                        "valid (sys.executable etc. point to paths that exist on the host)"
+                    } else {
+                        "image-internal (rebuild to enable host-valid paths)"
+                    }
+                );
             }
         }
-        let n = fs::read_dir(e.shim_dir()).map(|rd| rd.filter_map(|x| x.ok()).filter(|x| x.file_name() != SHIM_LINK).count()).unwrap_or(0);
+        let n = fs::read_dir(e.shim_dir())
+            .map(|rd| {
+                rd.filter_map(|x| x.ok())
+                    .filter(|x| x.file_name() != SHIM_LINK)
+                    .count()
+            })
+            .unwrap_or(0);
         println!("commands    : {} shimmed in {}", n, e.shim_dir().display());
     }
     if squashfuse {
         println!("gpu         : host GPUs and drivers are used directly");
     } else {
         let gf = gpu_flags(&e);
-        println!("gpu flags   : {}", if gf.is_empty() { "(none on this node)".to_string() } else { gf.join(" ") });
+        println!(
+            "gpu flags   : {}",
+            if gf.is_empty() {
+                "(none on this node)".to_string()
+            } else {
+                gf.join(" ")
+            }
+        );
     }
     let s = staleness(&e);
-    println!("status      : {}", if s.reasons.is_empty() { "up to date" } else { "needs attention" });
+    println!(
+        "status      : {}",
+        if s.reasons.is_empty() {
+            "up to date"
+        } else {
+            "needs attention"
+        }
+    );
     for r in s.reasons {
         println!("              - {}", r);
     }
@@ -679,9 +947,15 @@ fn cmd_activate(name: Option<&str>) -> Result<()> {
 
 fn cmd_deactivate() -> Result<()> {
     if stdout_is_tty() {
-        die("run `eval \"$(cvenv deactivate)\"` or install the shell hook (`cvenv shell-init`)", 2);
+        die(
+            "run `eval \"$(cvenv deactivate)\"` or install the shell hook (`cvenv shell-init`)",
+            2,
+        );
     }
-    if std::env::var("CVENV_ACTIVE").map(|s| s.is_empty()).unwrap_or(true) {
+    if std::env::var("CVENV_ACTIVE")
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
         info("no cvenv env is active");
     }
     print!("{}", runtime::deactivation_code());
@@ -705,19 +979,35 @@ fn cmd_move(name: &str, dest_arg: &str) -> Result<()> {
     }
     {
         // fail early if a build is running
-        let _l = util::lock_file(&e.art().join(".build.lock"), false, &format!("env '{}' (a build is running)", e.name))?;
+        let _l = util::lock_file(
+            &e.art().join(".build.lock"),
+            false,
+            &format!("env '{}' (a build is running)", e.name),
+        )?;
     }
-    info(&format!("moving '{}': {} -> {}", e.name, e.path.display(), dest.display()));
+    info(&format!(
+        "moving '{}': {} -> {}",
+        e.name,
+        e.path.display(),
+        dest.display()
+    ));
     // squashfuse mount points live outside the env directory (`mount-root`), so moving it
     // never pulls a mounted directory away from a running job
     move_dir(&e.path, &dest)?;
     let old = e.path.clone();
     let mut new_rec = None;
     update_registry(|r| {
-        let rec = r.envs.get_mut(name).ok_or_else(|| anyhow::anyhow!("env vanished from the registry"))?;
+        let rec = r
+            .envs
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("env vanished from the registry"))?;
         rec.path = dest.clone();
         if is_under(&rec.manifest, &old) {
-            rec.manifest = dest.join(rec.manifest.strip_prefix(&old).unwrap_or(Path::new("pixi.toml")));
+            rec.manifest = dest.join(
+                rec.manifest
+                    .strip_prefix(&old)
+                    .unwrap_or(Path::new("pixi.toml")),
+            );
         }
         new_rec = Some(rec.clone());
         Ok(())
@@ -737,7 +1027,10 @@ fn cmd_move(name: &str, dest_arg: &str) -> Result<()> {
         ));
     }
     if moved.is_active() {
-        info(&format!("other shells where it is active need `cvenv activate {}` again", name));
+        info(&format!(
+            "other shells where it is active need `cvenv activate {}` again",
+            name
+        ));
     }
     Ok(())
 }
@@ -747,7 +1040,12 @@ fn move_dir(src: &Path, dst: &Path) -> Result<()> {
     if fs::rename(src, dst).is_ok() {
         return Ok(());
     }
-    let ok = Command::new("cp").arg("-a").arg(src).arg(dst).status()?.success();
+    let ok = Command::new("cp")
+        .arg("-a")
+        .arg(src)
+        .arg(dst)
+        .status()?
+        .success();
     if !ok {
         remove_tree(dst);
         bail!("copying {} to {} failed", src.display(), dst.display());
@@ -760,12 +1058,23 @@ fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
     let e = resolve_env(Some(name), false, false)?;
     let install_path = e.meta().and_then(|m| m.install_path);
     if delete {
-        let targets: Vec<PathBuf> = if e.manifest_inside() { vec![e.path.clone()] } else { vec![e.art()] };
+        let targets: Vec<PathBuf> = if e.manifest_inside() {
+            vec![e.path.clone()]
+        } else {
+            vec![e.art()]
+        };
         if !yes {
             if !stdin_is_tty() {
                 bail!("refusing to delete without --yes");
             }
-            eprint!("delete {} ? [y/N] ", targets.iter().map(|t| t.display().to_string()).collect::<Vec<_>>().join(", "));
+            eprint!(
+                "delete {} ? [y/N] ",
+                targets
+                    .iter()
+                    .map(|t| t.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             let mut ans = String::new();
             std::io::stdin().read_line(&mut ans)?;
             if !matches!(ans.trim().to_lowercase().as_str(), "y" | "yes") {
@@ -792,7 +1101,11 @@ fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
     info(&format!("unregistered '{}'", name));
     if delete && e.kind == Kind::WrapInstall {
         if let Some(ip) = &install_path {
-            warn(&format!("if {} was replaced by a stub, it no longer works: restore it from {}.cvenv-orig-*", ip.display(), ip.display()));
+            warn(&format!(
+                "if {} was replaced by a stub, it no longer works: restore it from {}.cvenv-orig-*",
+                ip.display(),
+                ip.display()
+            ));
         }
     }
     if e.is_active() {
@@ -811,25 +1124,55 @@ fn cmd_config(action: Option<&str>, key: Option<&str>, value: Option<&str>) -> R
                     Some((v, config::Source::Env(e))) => (v, format!("env {}", e)),
                     Some((v, config::Source::Config)) => (v, "config".into()),
                     Some((v, config::Source::InstallConf)) => (v, "install.conf".into()),
-                    None => (if *k == "store" { config::store_dir().display().to_string() } else { "(auto)".into() }, "default".into()),
+                    None => (
+                        if *k == "store" {
+                            config::store_dir().display().to_string()
+                        } else {
+                            "(auto)".into()
+                        },
+                        "default".into(),
+                    ),
                 };
                 println!("{:<14} = {:<50} [{}]  # {}", k, val, src, desc);
             }
             Ok(())
         }
         Some(a @ ("get" | "set" | "unset")) => {
-            let key = key.ok_or_else(|| anyhow::anyhow!("usage: cvenv config {} KEY{}", a, if a == "set" { " VALUE" } else { "" }))?;
+            let key = key.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: cvenv config {} KEY{}",
+                    a,
+                    if a == "set" { " VALUE" } else { "" }
+                )
+            })?;
             if config::key_env(key).is_none() {
-                bail!("unknown key '{}'. Keys: {}", key, config::KEYS.iter().map(|k| k.0).collect::<Vec<_>>().join(", "));
+                bail!(
+                    "unknown key '{}'. Keys: {}",
+                    key,
+                    config::KEYS
+                        .iter()
+                        .map(|k| k.0)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             match a {
                 "get" => {
-                    let v = if key == "store" { Some(config::store_dir().display().to_string()) } else { config::value(key) };
+                    let v = if key == "store" {
+                        Some(config::store_dir().display().to_string())
+                    } else {
+                        config::value(key)
+                    };
                     println!("{}", v.unwrap_or_default());
                 }
                 "set" => {
-                    let v = value.ok_or_else(|| anyhow::anyhow!("usage: cvenv config set KEY VALUE"))?;
-                    let v = if config::PATH_KEYS.contains(&key) { expand(v).display().to_string() } else { v.to_string() };
+                    let v = value
+                        .ok_or_else(|| anyhow::anyhow!("usage: cvenv config set KEY VALUE"))?;
+                    let v = if config::PATH_KEYS.contains(&key) {
+                        expand(v).display().to_string()
+                    } else {
+                        v.to_string()
+                    };
                     config::set_value(key, Some(&v))?;
                     info(&format!("{} = {}", key, v));
                     if key == "store" {
@@ -853,7 +1196,10 @@ fn cmd_config(action: Option<&str>, key: Option<&str>, value: Option<&str>) -> R
 
 /// Extract `--env NAME` / `-n NAME` / `--env=NAME`. With `stop_at_positional`, only
 /// options before the first positional argument are examined (for `run CMD ...`).
-fn split_env_opt(argv: &[String], stop_at_positional: bool) -> Result<(Option<String>, Vec<String>)> {
+fn split_env_opt(
+    argv: &[String],
+    stop_at_positional: bool,
+) -> Result<(Option<String>, Vec<String>)> {
     let mut name = None;
     let mut rest = vec![];
     let mut i = 0;
@@ -865,7 +1211,11 @@ fn split_env_opt(argv: &[String], stop_at_positional: bool) -> Result<(Option<St
             break;
         }
         if a == "--env" || a == "-n" {
-            name = Some(argv.get(i + 1).ok_or_else(|| anyhow::anyhow!("{} needs a value", a))?.clone());
+            name = Some(
+                argv.get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("{} needs a value", a))?
+                    .clone(),
+            );
             i += 2;
             continue;
         }
@@ -907,7 +1257,12 @@ fn cmd_add_remove(verb: &str, argv: &[String]) -> Result<()> {
     let e = resolve_env(name.as_deref(), true, true)?;
     require_pixi(&e, verb)?;
     squash::drop_pixi_envs_link(&e);
-    let mut args = vec![verb.to_string(), "--manifest-path".into(), e.manifest.display().to_string(), "--frozen".into()];
+    let mut args = vec![
+        verb.to_string(),
+        "--manifest-path".into(),
+        e.manifest.display().to_string(),
+        "--frozen".into(),
+    ];
     args.extend(rest);
     if !host_pixi(&args)? {
         std::process::exit(1);
@@ -928,7 +1283,12 @@ fn cmd_task(argv: &[String]) -> Result<()> {
     if rest.is_empty() {
         rest.push("list".into());
     }
-    let mut args = vec!["task".to_string(), rest[0].clone(), "--manifest-path".into(), e.manifest.display().to_string()];
+    let mut args = vec![
+        "task".to_string(),
+        rest[0].clone(),
+        "--manifest-path".into(),
+        e.manifest.display().to_string(),
+    ];
     args.extend(rest[1..].iter().cloned());
     if !host_pixi(&args)? {
         std::process::exit(1);
@@ -941,7 +1301,9 @@ fn cmd_list(argv: &[String]) -> Result<()> {
     let e = resolve_env(name.as_deref(), true, true)?;
     if !e.is_pixi() {
         // wrapped envs: list the exposed commands
-        let meta = e.meta().ok_or_else(|| anyhow::anyhow!("env '{}' has no metadata", e.name))?;
+        let meta = e
+            .meta()
+            .ok_or_else(|| anyhow::anyhow!("env '{}' has no metadata", e.name))?;
         let pats: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
         println!("Commands exposed by {} env '{}':", e.kind.label(), e.name);
         for (n, p) in &meta.exec_paths {
@@ -952,7 +1314,8 @@ fn cmd_list(argv: &[String]) -> Result<()> {
         return Ok(());
     }
     let p = e.art().join("packages.txt");
-    let text = fs::read_to_string(&p).map_err(|_| anyhow::anyhow!("env '{}' has not been built yet", e.name))?;
+    let text = fs::read_to_string(&p)
+        .map_err(|_| anyhow::anyhow!("env '{}' has not been built yet", e.name))?;
     let pats: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
     for (i, line) in text.lines().enumerate() {
         if i == 0 || pats.is_empty() || pats.iter().any(|p| line.contains(p.as_str())) {
@@ -973,14 +1336,22 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
     }
     let e = resolve_env(name.as_deref(), true, true)?;
     if !e.built() {
-        bail!("env '{}' has not been built yet - run `{}`", e.name, e.rebuild_hint());
+        bail!(
+            "env '{}' has not been built yet - run `{}`",
+            e.name,
+            e.rebuild_hint()
+        );
     }
     warn_if_stale(&e);
     if !exec_mode && e.is_pixi() && env::task_names(&e).contains(&rest[0]) {
         let mut argv = if e.backend() == Backend::Squashfuse {
             // host pixi, pointed at the mounted env; --as-is: never install into the read-only image
             std::env::set_var("PIXI_HOME", squash::task_pixi_home(&e)?);
-            vec![find_pixi()?.display().to_string(), "run".into(), "--as-is".into()]
+            vec![
+                find_pixi()?.display().to_string(),
+                "run".into(),
+                "--as-is".into(),
+            ]
         } else {
             vec![IMG_PIXI.to_string(), "run".into(), "--frozen".into()]
         };
@@ -1000,7 +1371,10 @@ fn cmd_run(argv: &[String], exec_mode: bool) -> Result<()> {
         }
         // pixi may touch its repodata cache: keep it on node-local disk, not $HOME
         if std::env::var_os("PIXI_CACHE_DIR").is_none() {
-            std::env::set_var("PIXI_CACHE_DIR", build::build_tmp_root()?.join("pixi-run-cache"));
+            std::env::set_var(
+                "PIXI_CACHE_DIR",
+                build::build_tmp_root()?.join("pixi-run-cache"),
+            );
         }
     }
     exec_in_container(&e, &rest, "exec")
@@ -1010,7 +1384,11 @@ fn cmd_shell(argv: &[String]) -> Result<()> {
     let (name, rest) = split_env_opt(argv, true)?;
     let e = resolve_env(name.as_deref(), true, true)?;
     if !e.built() {
-        bail!("env '{}' has not been built yet - run `{}`", e.name, e.rebuild_hint());
+        bail!(
+            "env '{}' has not been built yet - run `{}`",
+            e.name,
+            e.rebuild_hint()
+        );
     }
     warn_if_stale(&e);
     exec_in_container(&e, &rest, "shell")
@@ -1044,7 +1422,11 @@ fn cmd_register(path: &str, name: Option<&str>) -> Result<()> {
     }
     let reg = load_registry();
     if let Some(r) = reg.envs.get(&e.name) {
-        bail!("you already have an env named '{}' ({}); pick another with --name", e.name, r.path.display());
+        bail!(
+            "you already have an env named '{}' ({}); pick another with --name",
+            e.name,
+            r.path.display()
+        );
     }
     let mut rec = e.record();
     rec.created = Some(now_iso());
@@ -1063,7 +1445,19 @@ fn cmd_register(path: &str, name: Option<&str>) -> Result<()> {
 /// under `.cvenv/mnt/` or anywhere else are read-only and not part of the tree).
 fn tree_cmd(root: &Path, cmd: &[&str]) -> Result<bool> {
     let mut c = Command::new("find");
-    c.arg(root).args(["-xdev", "(", "-path", "*/.cvenv/mnt/*", "-prune", ")", "-o", "-exec"]).args(cmd).args(["{}", "+"]);
+    c.arg(root)
+        .args([
+            "-xdev",
+            "(",
+            "-path",
+            "*/.cvenv/mnt/*",
+            "-prune",
+            ")",
+            "-o",
+            "-exec",
+        ])
+        .args(cmd)
+        .args(["{}", "+"]);
     Ok(c.status()?.success())
 }
 
@@ -1111,12 +1505,26 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
         // the directories above the mount point (`<mount-root>/<env-id>`) must be enterable
         if e.kind != Kind::WrapInstall {
             for d in mp.ancestors().skip(1).take(2) {
-                let _ = Command::new("chmod").arg(if world { "g+x,o+x" } else { "g+x" }).arg(d).status();
+                let _ = Command::new("chmod")
+                    .arg(if world { "g+x,o+x" } else { "g+x" })
+                    .arg(d)
+                    .status();
             }
         }
         let w = if world { "g+w,o+w" } else { "g+w" };
-        if squash::state(mp) == squash::MountState::NotMounted && Command::new("chmod").arg(w).arg(mp).status().map(|s| s.success()).unwrap_or(false) {
-            info(&format!("{} can now mount the image at {}", who, mp.display()));
+        if squash::state(mp) == squash::MountState::NotMounted
+            && Command::new("chmod")
+                .arg(w)
+                .arg(mp)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        {
+            info(&format!(
+                "{} can now mount the image at {}",
+                who,
+                mp.display()
+            ));
         } else {
             warn(&format!("could not make {} group-writable (mounted on this node?); others can't mount the image until it is", mp.display()));
         }
@@ -1151,16 +1559,33 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
     // the shims run this cvenv binary, so it must be reachable too
     let exe = config::exe_path();
     check(&exe);
-    let exe_ok = fs::metadata(&exe).map(|m| m.permissions().mode() & (bit * 5) == bit * 5).unwrap_or(false);
+    let exe_ok = fs::metadata(&exe)
+        .map(|m| m.permissions().mode() & (bit * 5) == bit * 5)
+        .unwrap_or(false);
     if !blocked.is_empty() {
-        warn(&format!("{} cannot enter these parent directories (missing x permission):", who));
+        warn(&format!(
+            "{} cannot enter these parent directories (missing x permission):",
+            who
+        ));
         for b in &blocked {
             eprintln!("        {}", b.display());
         }
-        eprintln!("    fix (if appropriate): chmod {}+x {}", if world { "o" } else { "g" }, blocked.iter().map(|b| util::qp(b)).collect::<Vec<_>>().join(" "));
+        eprintln!(
+            "    fix (if appropriate): chmod {}+x {}",
+            if world { "o" } else { "g" },
+            blocked
+                .iter()
+                .map(|b| util::qp(b))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     if !exe_ok {
-        warn(&format!("{} cannot run the cvenv binary {} that the shims use", who, exe.display()));
+        warn(&format!(
+            "{} cannot run the cvenv binary {} that the shims use",
+            who,
+            exe.display()
+        ));
     }
     println!(
         "Others can now use it with:\n    cvenv register {p}              # once, then `cvenv activate {n}`\n    cvenv run --env {p} CMD\n    {p}/.cvenv/bin/python ...        # the shims work directly",
@@ -1177,7 +1602,10 @@ fn cmd_share(sel: &str, world: bool, group: Option<&str>) -> Result<()> {
 /// Requirement specs from a pip requirements file (follows -r includes).
 fn parse_requirements(file: &Path, out: &mut Vec<String>, depth: usize) -> Result<()> {
     if depth > 10 {
-        bail!("requirements includes nested too deeply at {}", file.display());
+        bail!(
+            "requirements includes nested too deeply at {}",
+            file.display()
+        );
     }
     let text = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let base = file.parent().unwrap_or(Path::new("."));
@@ -1190,12 +1618,20 @@ fn parse_requirements(file: &Path, out: &mut Vec<String>, depth: usize) -> Resul
             None => raw,
         };
         // drop per-requirement options such as --hash=...
-        let line: String = line.split_whitespace().filter(|w| !w.starts_with("--hash")).collect::<Vec<_>>().join(" ");
+        let line: String = line
+            .split_whitespace()
+            .filter(|w| !w.starts_with("--hash"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(inc) = line.strip_prefix("-r ").or_else(|| line.strip_prefix("--requirement ")).or_else(|| line.strip_prefix("--requirement=")) {
+        if let Some(inc) = line
+            .strip_prefix("-r ")
+            .or_else(|| line.strip_prefix("--requirement "))
+            .or_else(|| line.strip_prefix("--requirement="))
+        {
             parse_requirements(&base.join(inc.trim()), out, depth + 1)?;
         } else if line.starts_with('-') {
             warn(&format!(
@@ -1213,10 +1649,32 @@ fn import_requirements(manifest: &Path, file: &Path, python: &str) -> Result<()>
     let mut specs = vec![];
     parse_requirements(file, &mut specs, 0)?;
     let pixi = find_pixi()?;
-    let has_python = fs::read_to_string(manifest).map(|s| s.lines().any(|l| l.trim_start().starts_with("python ") || l.trim_start().starts_with("python="))).unwrap_or(false);
+    let has_python = fs::read_to_string(manifest)
+        .map(|s| {
+            s.lines().any(|l| {
+                l.trim_start().starts_with("python ") || l.trim_start().starts_with("python=")
+            })
+        })
+        .unwrap_or(false);
     if !has_python {
-        let spec = if python.contains(['=', '<', '>', '*']) { format!("python{}", if python.starts_with(['=', '<', '>']) { python.to_string() } else { format!("={}", python) }) } else { format!("python={}", python) };
-        let ok = Command::new(&pixi).args(["add", "--frozen", "--manifest-path"]).arg(manifest).arg(&spec).status()?.success();
+        let spec = if python.contains(['=', '<', '>', '*']) {
+            format!(
+                "python{}",
+                if python.starts_with(['=', '<', '>']) {
+                    python.to_string()
+                } else {
+                    format!("={}", python)
+                }
+            )
+        } else {
+            format!("python={}", python)
+        };
+        let ok = Command::new(&pixi)
+            .args(["add", "--frozen", "--manifest-path"])
+            .arg(manifest)
+            .arg(&spec)
+            .status()?
+            .success();
         if !ok {
             bail!("adding {} failed", spec);
         }
@@ -1235,9 +1693,16 @@ fn import_requirements(manifest: &Path, file: &Path, python: &str) -> Result<()>
             failed.push(spec.clone());
         }
     }
-    info(&format!("imported {} of {} requirements as pypi-dependencies", specs.len() - failed.len(), specs.len()));
+    info(&format!(
+        "imported {} of {} requirements as pypi-dependencies",
+        specs.len() - failed.len(),
+        specs.len()
+    ));
     if !failed.is_empty() {
-        warn(&format!("could not add (edit [pypi-dependencies] in {} by hand):", manifest.display()));
+        warn(&format!(
+            "could not add (edit [pypi-dependencies] in {} by hand):",
+            manifest.display()
+        ));
         for f in failed {
             eprintln!("        {}", f);
         }

@@ -1,7 +1,9 @@
 //! Registry of envs, the `Env` model, manifest access, fingerprints and staleness.
 
-use crate::config::{registry_path, config_dir};
-use crate::util::{absolute, is_under, lock_file, read_json, realpath, sha256_bytes, sha256_file, warn, write_json};
+use crate::config::{config_dir, registry_path};
+use crate::util::{
+    absolute, is_under, lock_file, read_json, realpath, sha256_bytes, sha256_file, warn, write_json,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as J};
@@ -23,8 +25,15 @@ pub const WRAP_CFG: &str = "cvenv.toml";
 
 /// Workspace metadata that does not influence what gets installed.
 const NON_DEP_WORKSPACE_KEYS: &[&str] = &[
-    "description", "authors", "version", "license", "license-file", "readme",
-    "homepage", "repository", "documentation",
+    "description",
+    "authors",
+    "version",
+    "license",
+    "license-file",
+    "readme",
+    "homepage",
+    "repository",
+    "documentation",
 ];
 /// `[tool.cvenv]` keys that change the image (everything else is runtime-only).
 pub const BUILD_CFG_KEYS: &[&str] = &["base-image", "post-commands"];
@@ -118,7 +127,11 @@ pub fn load_registry() -> Registry {
 
 /// Locked read-modify-write of the registry.
 pub fn update_registry<F: FnOnce(&mut Registry) -> Result<()>>(f: F) -> Result<()> {
-    let _l = lock_file(&config_dir().join("registry.json.lock"), true, "the registry")?;
+    let _l = lock_file(
+        &config_dir().join("registry.json.lock"),
+        true,
+        "the registry",
+    )?;
     let mut reg = load_registry();
     f(&mut reg)?;
     write_json(&registry_path(), &reg)
@@ -227,12 +240,30 @@ impl Env {
         let dir = realpath(dir);
         let f = dir.join(ART_DIR).join(ENV_FILE);
         let ef: EnvFile = read_json(&f).ok_or_else(|| {
-            anyhow!("{} is not a cvenv env (no readable {})", dir.display(), f.display())
+            anyhow!(
+                "{} is not a cvenv env (no readable {})",
+                dir.display(),
+                f.display()
+            )
         })?;
-        let manifest = if ef.manifest.is_absolute() { ef.manifest.clone() } else { dir.join(&ef.manifest) };
-        let rec = Record { path: dir, manifest, kind: ef.kind, pixi_env: ef.pixi_env, created: None };
+        let manifest = if ef.manifest.is_absolute() {
+            ef.manifest.clone()
+        } else {
+            dir.join(&ef.manifest)
+        };
+        let rec = Record {
+            path: dir,
+            manifest,
+            kind: ef.kind,
+            pixi_env: ef.pixi_env,
+            created: None,
+        };
         let mut e = Env::new(&ef.name, &rec);
-        e.unregistered = load_registry().envs.get(&ef.name).map(|r| realpath(&r.path) != rec.path).unwrap_or(true);
+        e.unregistered = load_registry()
+            .envs
+            .get(&ef.name)
+            .map(|r| realpath(&r.path) != rec.path)
+            .unwrap_or(true);
         Ok(e)
     }
 
@@ -248,14 +279,26 @@ impl Env {
 
     /// Write `.cvenv/env.json` (best effort: shared envs may not be writable by us).
     pub fn write_env_file(&self) -> Result<()> {
-        let manifest = self.manifest.strip_prefix(&self.path).map(Path::to_path_buf).unwrap_or_else(|_| self.manifest.clone());
-        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone(), id: self.env_id() };
+        let manifest = self
+            .manifest
+            .strip_prefix(&self.path)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| self.manifest.clone());
+        let ef = EnvFile {
+            name: self.name.clone(),
+            kind: self.kind,
+            manifest,
+            pixi_env: self.pixi_env.clone(),
+            id: self.env_id(),
+        };
         write_json(&self.art().join(ENV_FILE), &ef)
     }
 
     /// The env's permanent id, if it has one (see `ensure_env_id`).
     pub fn env_id(&self) -> Option<String> {
-        read_json::<EnvFile>(&self.art().join(ENV_FILE)).and_then(|f| f.id).filter(|i| valid_name(i))
+        read_json::<EnvFile>(&self.art().join(ENV_FILE))
+            .and_then(|f| f.id)
+            .filter(|i| valid_name(i))
     }
 
     /// The env's permanent id, created (and saved in env.json) on first use.
@@ -263,10 +306,26 @@ impl Env {
         if let Some(id) = self.env_id() {
             return Ok(id);
         }
-        let seed = format!("{}|{}|{}|{:?}", self.path.display(), crate::util::now_iso(), std::process::id(), std::time::SystemTime::now());
+        let seed = format!(
+            "{}|{}|{}|{:?}",
+            self.path.display(),
+            crate::util::now_iso(),
+            std::process::id(),
+            std::time::SystemTime::now()
+        );
         let id = sha256_bytes(seed.as_bytes())[..16].to_string();
-        let manifest = self.manifest.strip_prefix(&self.path).map(Path::to_path_buf).unwrap_or_else(|_| self.manifest.clone());
-        let ef = EnvFile { name: self.name.clone(), kind: self.kind, manifest, pixi_env: self.pixi_env.clone(), id: Some(id.clone()) };
+        let manifest = self
+            .manifest
+            .strip_prefix(&self.path)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| self.manifest.clone());
+        let ef = EnvFile {
+            name: self.name.clone(),
+            kind: self.kind,
+            manifest,
+            pixi_env: self.pixi_env.clone(),
+            id: Some(id.clone()),
+        };
         write_json(&self.art().join(ENV_FILE), &ef)?;
         Ok(id)
     }
@@ -299,7 +358,10 @@ impl Env {
             Backend::Apptainer => self.art().join(IMAGE_NAME),
             Backend::Squashfuse => match self.kind {
                 Kind::WrapInstall => self.art().join(crate::runtime::INSTALL_SQFS),
-                _ => self.art().join(meta.and_then(|m| m.squash_image).unwrap_or_else(|| "image.sqfs".into())),
+                _ => self.art().join(
+                    meta.and_then(|m| m.squash_image)
+                        .unwrap_or_else(|| "image.sqfs".into()),
+                ),
             },
         }
     }
@@ -310,13 +372,19 @@ impl Env {
         self.art().join("bin")
     }
     pub fn manifest_dir(&self) -> PathBuf {
-        self.manifest.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"))
+        self.manifest
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"))
     }
     pub fn lock_path(&self) -> PathBuf {
         self.manifest_dir().join("pixi.lock")
     }
     pub fn is_pyproject(&self) -> bool {
-        self.manifest.file_name().map(|n| n == "pyproject.toml").unwrap_or(false)
+        self.manifest
+            .file_name()
+            .map(|n| n == "pyproject.toml")
+            .unwrap_or(false)
     }
     pub fn manifest_inside(&self) -> bool {
         is_under(&self.manifest, &self.path)
@@ -328,7 +396,9 @@ impl Env {
         read_json(&self.meta_path())
     }
     pub fn is_active(&self) -> bool {
-        std::env::var("CVENV_ACTIVE").map(|a| a == self.name).unwrap_or(false)
+        std::env::var("CVENV_ACTIVE")
+            .map(|a| a == self.name)
+            .unwrap_or(false)
     }
     /// `cvenv rebuild` or `cvenv rebuild --env NAME`, depending on what is active.
     pub fn rebuild_hint(&self) -> String {
@@ -348,10 +418,15 @@ impl Env {
             let _ = self.data.set(toml::Table::new());
             return Ok(self.data.get().unwrap());
         }
-        let text = fs::read_to_string(&self.manifest)
-            .with_context(|| format!("manifest of env '{}' not found: {}", self.name, self.manifest.display()))?;
-        let t: toml::Table =
-            toml::from_str(&text).map_err(|e| anyhow!("could not parse {}: {}", self.manifest.display(), e))?;
+        let text = fs::read_to_string(&self.manifest).with_context(|| {
+            format!(
+                "manifest of env '{}' not found: {}",
+                self.name,
+                self.manifest.display()
+            )
+        })?;
+        let t: toml::Table = toml::from_str(&text)
+            .map_err(|e| anyhow!("could not parse {}: {}", self.manifest.display(), e))?;
         let _ = self.data.set(t);
         Ok(self.data.get().unwrap())
     }
@@ -377,7 +452,11 @@ impl Env {
             Err(_) => return toml::Table::new(),
         };
         if self.is_pyproject() {
-            d.get("tool").and_then(|t| t.get("pixi")).and_then(|p| p.as_table()).cloned().unwrap_or_default()
+            d.get("tool")
+                .and_then(|t| t.get("pixi"))
+                .and_then(|p| p.as_table())
+                .cloned()
+                .unwrap_or_default()
         } else {
             d.clone()
         }
@@ -423,7 +502,15 @@ pub fn resolve_env(name: Option<&str>, allow_active: bool, allow_cwd: bool) -> R
                 bail!(
                     "unknown env '{}'. Registered envs: {}",
                     n,
-                    if known.is_empty() { "(none)".to_string() } else { known.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") }
+                    if known.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        known
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
                 )
             }
         };
@@ -459,7 +546,11 @@ pub fn env_for_dir(d: &Path, reg: &Registry) -> Option<Env> {
     let d = realpath(d);
     let mut best: Option<(&String, usize)> = None;
     for (n, rec) in &reg.envs {
-        let mdir = rec.manifest.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mdir = rec
+            .manifest
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         for root in [&rec.path, &mdir] {
             let r = realpath(root);
             if is_under(&d, &r) {
@@ -492,7 +583,10 @@ pub fn find_manifest(p: &Path) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p);
     }
-    MANIFEST_NAMES.iter().map(|n| p.join(n)).find(|c| c.is_file())
+    MANIFEST_NAMES
+        .iter()
+        .map(|n| p.join(n))
+        .find(|c| c.is_file())
 }
 
 // ---------------------------------------------------------------------------
@@ -517,7 +611,12 @@ pub fn deps_view(env: &Env) -> Result<J> {
     let mut view = if pyproject {
         let proj = data.get("project").cloned().unwrap_or(J::Null);
         let mut sub = serde_json::Map::new();
-        for k in ["name", "dependencies", "optional-dependencies", "requires-python"] {
+        for k in [
+            "name",
+            "dependencies",
+            "optional-dependencies",
+            "requires-python",
+        ] {
             if let Some(v) = proj.get(k) {
                 sub.insert(k.into(), v.clone());
             }
@@ -535,7 +634,11 @@ pub fn deps_view(env: &Env) -> Result<J> {
         d
     };
     {
-        let pix: &mut J = if pyproject { view.get_mut("pixi").unwrap() } else { &mut view };
+        let pix: &mut J = if pyproject {
+            view.get_mut("pixi").unwrap()
+        } else {
+            &mut view
+        };
         for ws in ["workspace", "project"] {
             if ws == "workspace" || !pyproject {
                 if let Some(J::Object(w)) = pix.get_mut(ws) {
@@ -572,18 +675,28 @@ pub fn compute_fingerprint(env: &Env) -> Result<Fingerprint> {
     let lock = env.lock_path();
     Ok(Fingerprint {
         deps: sha256_bytes(blob.as_bytes()),
-        lock: if lock.is_file() { Some(sha256_file(&lock)?) } else { None },
+        lock: if lock.is_file() {
+            Some(sha256_file(&lock)?)
+        } else {
+            None
+        },
     })
 }
 
 fn stat_one(p: &Path) -> Option<[i64; 2]> {
     use std::os::unix::fs::MetadataExt;
     let m = fs::metadata(p).ok()?;
-    Some([m.mtime() * 1_000_000 + m.mtime_nsec() / 1000, m.size() as i64])
+    Some([
+        m.mtime() * 1_000_000 + m.mtime_nsec() / 1000,
+        m.size() as i64,
+    ])
 }
 
 pub fn stat_sig(env: &Env) -> StatSig {
-    StatSig { manifest: stat_one(&env.manifest), lock: stat_one(&env.lock_path()) }
+    StatSig {
+        manifest: stat_one(&env.manifest),
+        lock: stat_one(&env.lock_path()),
+    }
 }
 
 #[derive(Default)]
@@ -599,7 +712,11 @@ pub fn staleness(env: &Env) -> Staleness {
     let mut s = Staleness::default();
     if !env.built() {
         s.not_built = true;
-        s.reasons.push(format!("env '{}' has not been built yet - run `{}`", env.name, env.rebuild_hint()));
+        s.reasons.push(format!(
+            "env '{}' has not been built yet - run `{}`",
+            env.name,
+            env.rebuild_hint()
+        ));
         return s;
     }
     if !env.is_pixi() {
@@ -609,7 +726,10 @@ pub fn staleness(env: &Env) -> Staleness {
         Some(m) => m,
         None => {
             s.changed = true;
-            s.reasons.push(format!("no build metadata found next to the image - run `{}`", env.rebuild_hint()));
+            s.reasons.push(format!(
+                "no build metadata found next to the image - run `{}`",
+                env.rebuild_hint()
+            ));
             return s;
         }
     };
@@ -635,24 +755,35 @@ pub fn staleness(env: &Env) -> Staleness {
     }
     if !env.manifest.is_file() {
         s.changed = true;
-        s.reasons.push(format!("manifest {} is missing", env.manifest.display()));
+        s.reasons
+            .push(format!("manifest {} is missing", env.manifest.display()));
         return s;
     }
     let fp = match compute_fingerprint(env) {
         Ok(f) => f,
         Err(e) => {
             s.changed = true;
-            s.reasons.push(format!("could not check the manifest: {:#}", e));
+            s.reasons
+                .push(format!("could not check the manifest: {:#}", e));
             return s;
         }
     };
-    let manifest_name = env.manifest.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let manifest_name = env
+        .manifest
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     if fp.deps != meta.fingerprint.deps {
         s.changed = true;
-        s.reasons.push(format!("dependencies in {} changed since the image was built", manifest_name));
+        s.reasons.push(format!(
+            "dependencies in {} changed since the image was built",
+            manifest_name
+        ));
     } else if fp.lock != meta.fingerprint.lock {
         s.changed = true;
-        s.reasons.push("pixi.lock changed since the image was built".into());
+        s.reasons
+            .push("pixi.lock changed since the image was built".into());
     } else {
         // only irrelevant edits (tasks, description, ...): refresh the stat cache
         meta.stat = sig;
@@ -728,7 +859,11 @@ pub fn cuda_requirement(env: &Env) -> Option<String> {
     grab(&pix, &mut vals);
     // newer pixi: platforms = [{ platform = "linux-64", cuda = "12.0" }, ...]
     for ws in ["workspace", "project"] {
-        if let Some(plats) = pix.get(ws).and_then(|w| w.get("platforms")).and_then(|p| p.as_array()) {
+        if let Some(plats) = pix
+            .get(ws)
+            .and_then(|w| w.get("platforms"))
+            .and_then(|p| p.as_array())
+        {
             for p in plats {
                 if let Some(c) = p.as_table().and_then(|t| t.get("cuda")) {
                     vals.push(toml_to_string(c));
@@ -743,6 +878,10 @@ pub fn cuda_requirement(env: &Env) -> Option<String> {
             }
         }
     }
-    let key = |v: &String| -> Vec<u64> { v.split(|c: char| !c.is_ascii_digit()).filter_map(|x| x.parse().ok()).collect() };
+    let key = |v: &String| -> Vec<u64> {
+        v.split(|c: char| !c.is_ascii_digit())
+            .filter_map(|x| x.parse().ok())
+            .collect()
+    };
     vals.into_iter().max_by(|a, b| key(a).cmp(&key(b)))
 }

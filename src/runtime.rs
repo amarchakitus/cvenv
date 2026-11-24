@@ -24,18 +24,58 @@ pub const INSTALL_SQFS: &str = "install.sqfs";
 /// Host variables removed before entering the container: they would point the
 /// containerised interpreter at host installations.
 pub const HOST_ENV_DROP: &[&str] = &[
-    "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL",
-    "CONDA_PROMPT_MODIFIER", "PIXI_PROJECT_ROOT", "PIXI_PROJECT_MANIFEST", "PIXI_ENVIRONMENT_NAME",
+    "PYTHONHOME",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "CONDA_SHLVL",
+    "CONDA_PROMPT_MODIFIER",
+    "PIXI_PROJECT_ROOT",
+    "PIXI_PROJECT_MANIFEST",
+    "PIXI_ENVIRONMENT_NAME",
     "PIXI_IN_SHELL",
 ];
 
 /// Executables that are not shimmed by default: launching a container for these
 /// would only slow down or confuse the host shell.
 const DEFAULT_SHIM_EXCLUDE: &[&str] = &[
-    "clear", "reset", "tput", "tabs", "tset", "tic", "toe", "infocmp", "captoinfo", "infotocap",
-    "ncurses*-config", "ncursesw*-config", "xz*", "unxz", "lz*", "unlz*", "bz*", "bunzip2",
-    "zstd*", "unzstd", "pzstd", "gzip", "gunzip", "zcat", "zcmp", "zdiff", "zgrep", "zless",
-    "zmore", "znew", "c_rehash", "pixi", "cvenv", "activate", "deactivate", "conda", "mamba",
+    "clear",
+    "reset",
+    "tput",
+    "tabs",
+    "tset",
+    "tic",
+    "toe",
+    "infocmp",
+    "captoinfo",
+    "infotocap",
+    "ncurses*-config",
+    "ncursesw*-config",
+    "xz*",
+    "unxz",
+    "lz*",
+    "unlz*",
+    "bz*",
+    "bunzip2",
+    "zstd*",
+    "unzstd",
+    "pzstd",
+    "gzip",
+    "gunzip",
+    "zcat",
+    "zcmp",
+    "zdiff",
+    "zgrep",
+    "zless",
+    "zmore",
+    "znew",
+    "c_rehash",
+    "pixi",
+    "cvenv",
+    "activate",
+    "deactivate",
+    "conda",
+    "mamba",
     "micromamba",
 ];
 
@@ -44,7 +84,9 @@ const DEFAULT_SHIM_EXCLUDE: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 fn is_shim(p: &Path) -> bool {
-    p.parent().map(|d| d.join(SHIM_LINK).exists()).unwrap_or(false)
+    p.parent()
+        .map(|d| d.join(SHIM_LINK).exists())
+        .unwrap_or(false)
 }
 
 pub fn find_apptainer() -> Result<PathBuf> {
@@ -53,7 +95,10 @@ pub fn find_apptainer() -> Result<PathBuf> {
         if is_executable(&p) {
             return Ok(p);
         }
-        warn(&format!("configured apptainer {} is not executable; searching PATH", p.display()));
+        warn(&format!(
+            "configured apptainer {} is not executable; searching PATH",
+            p.display()
+        ));
     }
     for n in ["apptainer", "singularity"] {
         if let Some(p) = which(n) {
@@ -68,7 +113,11 @@ pub fn find_apptainer() -> Result<PathBuf> {
 
 /// The backend a build uses: `--backend` > `backend` setting > the env's current backend >
 /// auto-detection (Apptainer if installed, otherwise squashfuse).
-pub fn select_backend(env: Option<&Env>, requested: Option<Backend>, kind: Kind) -> Result<Backend> {
+pub fn select_backend(
+    env: Option<&Env>,
+    requested: Option<Backend>,
+    kind: Kind,
+) -> Result<Backend> {
     if kind == Kind::Wrap {
         if requested == Some(Backend::Squashfuse) {
             bail!("`cvenv wrap` runs existing container images and needs Apptainer; the squashfuse backend can't run them");
@@ -82,8 +131,12 @@ pub fn select_backend(env: Option<&Env>, requested: Option<Backend>, kind: Kind)
         match v.trim().to_lowercase().as_str() {
             "" | "auto" => {}
             other => {
-                return Backend::parse(other)
-                    .ok_or_else(|| anyhow::anyhow!("invalid `backend` setting '{}' (auto, apptainer or squashfuse)", other))
+                return Backend::parse(other).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid `backend` setting '{}' (auto, apptainer or squashfuse)",
+                        other
+                    )
+                })
             }
         }
     }
@@ -113,21 +166,30 @@ pub fn find_pixi() -> Result<PathBuf> {
     if let Some(p) = which("pixi") {
         cands.push(p);
     }
-    let pixi_home = std::env::var("PIXI_HOME").map(PathBuf::from).unwrap_or_else(|_| crate::util::home().join(".pixi"));
+    let pixi_home = std::env::var("PIXI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::util::home().join(".pixi"));
     cands.push(pixi_home.join("bin").join("pixi"));
     for c in cands {
         if is_executable(&c) && !is_shim(&c) {
             return Ok(realpath(&c));
         }
     }
-    bail!("pixi not found. Install it (installation.sh can) or `cvenv config set pixi /path/to/pixi`")
+    bail!(
+        "pixi not found. Install it (installation.sh can) or `cvenv config set pixi /path/to/pixi`"
+    )
 }
 
 pub fn pixi_version(pixi: &Path) -> Option<String> {
     let out = Command::new(pixi).arg("--version").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     s.split_whitespace()
-        .find(|w| w.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+        .find(|w| {
+            w.chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        })
         .map(|w| w.to_string())
 }
 
@@ -155,7 +217,11 @@ fn apptainer_conf(app: &Path) -> Option<PathBuf> {
 
 /// Directories apptainer already binds on this machine.
 fn site_bind_paths(app: &Path) -> Vec<PathBuf> {
-    let mut v = vec![crate::util::home(), PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
+    let mut v = vec![
+        crate::util::home(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+    ];
     if let Ok(cwd) = std::env::current_dir() {
         v.push(cwd);
     }
@@ -182,16 +248,25 @@ fn site_bind_paths(app: &Path) -> Vec<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn truthy(v: &str) -> bool {
-    matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn falsy(v: &str) -> bool {
-    matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no" | "off" | "none" | "")
+    matches!(
+        v.trim().to_lowercase().as_str(),
+        "0" | "false" | "no" | "off" | "none" | ""
+    )
 }
 
 pub fn gpu_flags(env: &Env) -> Vec<String> {
     let v = std::env::var("CVENV_GPU").ok().unwrap_or_else(|| {
-        env.cfg().get("gpu").map(crate::env::toml_to_string).unwrap_or_else(|| "auto".into())
+        env.cfg()
+            .get("gpu")
+            .map(crate::env::toml_to_string)
+            .unwrap_or_else(|| "auto".into())
     });
     let v = v.trim().to_lowercase();
     if ["nv", "nvidia", "cuda"].contains(&v.as_str()) || truthy(&v) {
@@ -208,7 +283,14 @@ pub fn gpu_flags(env: &Env) -> Vec<String> {
         .map(|rd| {
             rd.filter_map(|e| e.ok()).any(|e| {
                 let n = e.file_name().to_string_lossy().to_string();
-                n.strip_prefix("nvidia").map(|r| r.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)).unwrap_or(false)
+                n.strip_prefix("nvidia")
+                    .map(|r| {
+                        r.chars()
+                            .next()
+                            .map(|c| c.is_ascii_digit())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
             })
         })
         .unwrap_or(false);
@@ -240,7 +322,11 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     }
     let mut extra = env.cfg_str_list("binds");
     if let Ok(b) = std::env::var("CVENV_BINDS") {
-        extra.extend(b.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        extra.extend(
+            b.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
     }
     for b in extra {
         let (src, rest) = match b.split_once(':') {
@@ -249,7 +335,10 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
         };
         let src = expand(&src);
         if !src.exists() {
-            warn(&format!("bind source {} does not exist; skipping", src.display()));
+            warn(&format!(
+                "bind source {} does not exist; skipping",
+                src.display()
+            ));
             continue;
         }
         binds.push(match rest {
@@ -264,8 +353,16 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     let first = args.first().filter(|a| !a.contains('/')).cloned();
     if env.kind == Kind::WrapInstall {
         if let Some(ip) = &meta.install_path {
-            binds.push(format!("{}:{}:image-src=/", env.art().join(INSTALL_SQFS).display(), ip.display()));
-            prepend.extend(meta.bin_dirs.iter().map(|d| ip.join(d).display().to_string()));
+            binds.push(format!(
+                "{}:{}:image-src=/",
+                env.art().join(INSTALL_SQFS).display(),
+                ip.display()
+            ));
+            prepend.extend(
+                meta.bin_dirs
+                    .iter()
+                    .map(|d| ip.join(d).display().to_string()),
+            );
             if meta.conda {
                 argv.push("--env".into());
                 argv.push(format!("CONDA_PREFIX={}", ip.display()));
@@ -274,7 +371,10 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
         }
     } else {
         let layer = env.art().join(LAYER_DIR);
-        let enabled = cfg.get("host-valid-paths").and_then(|v| v.as_bool()).unwrap_or(true);
+        let enabled = cfg
+            .get("host-valid-paths")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         if enabled && layer.is_dir() && !meta.exec_paths.is_empty() {
             binds.push(format!("{}:{}", layer.display(), env.shim_dir().display()));
             prepend.push(env.shim_dir().display().to_string());
@@ -330,8 +430,14 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
         penv.remove(*k);
     }
     penv.insert("CVENV_ENV".into(), env.name.clone());
-    penv.insert("CVENV_IMAGE".into(), env.image().to_string_lossy().to_string());
-    let isolate = cfg.get("isolate-user-site").and_then(|v| v.as_bool()).unwrap_or(true);
+    penv.insert(
+        "CVENV_IMAGE".into(),
+        env.image().to_string_lossy().to_string(),
+    );
+    let isolate = cfg
+        .get("isolate-user-site")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     if isolate {
         // don't let ~/.local/lib/pythonX.Y/site-packages leak into the env
         penv.insert("PYTHONNOUSERSITE".into(), "1".into());
@@ -339,7 +445,10 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     // pip can't write to the read-only image; never let it fall back to ~/.local
     penv.entry("PIP_USER".into()).or_insert_with(|| "0".into());
     if !prepend.is_empty() {
-        if let Some(user) = penv.get("APPTAINERENV_PREPEND_PATH").filter(|v| !v.is_empty()) {
+        if let Some(user) = penv
+            .get("APPTAINERENV_PREPEND_PATH")
+            .filter(|v| !v.is_empty())
+        {
             prepend.push(user.clone());
         }
         penv.insert("APPTAINERENV_PREPEND_PATH".into(), prepend.join(":"));
@@ -351,16 +460,27 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
 /// ... image args`, or (squashfuse backend) the command itself from the mounted image.
 pub fn exec_in_container(env: &Env, args: &[String], mode: &str) -> Result<()> {
     if !env.built() {
-        bail!("env '{}' has not been built yet - run `{}`", env.name, env.rebuild_hint());
+        bail!(
+            "env '{}' has not been built yet - run `{}`",
+            env.name,
+            env.rebuild_hint()
+        );
     }
     if env.backend() == Backend::Squashfuse {
         return crate::squash::exec(env, args, mode);
     }
     let cc = container_command(env, args, mode)?;
     if std::env::var_os("CVENV_DEBUG").is_some() {
-        crate::util::info(&format!("exec: {}", cc.argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")));
+        crate::util::info(&format!(
+            "exec: {}",
+            cc.argv.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")
+        ));
     }
-    let err = Command::new(&cc.argv[0]).args(&cc.argv[1..]).env_clear().envs(&cc.env).exec();
+    let err = Command::new(&cc.argv[0])
+        .args(&cc.argv[1..])
+        .env_clear()
+        .envs(&cc.env)
+        .exec();
     Err(err).with_context(|| format!("failed to run {}", cc.argv[0]))
 }
 
@@ -369,7 +489,13 @@ pub fn exec_in_container(env: &Env, args: &[String], mode: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn shim_excluded(name: &str, env: &Env) -> bool {
-    let matches = |pats: &[String]| pats.iter().any(|p| glob::Pattern::new(p).map(|g| g.matches(name)).unwrap_or(false));
+    let matches = |pats: &[String]| {
+        pats.iter().any(|p| {
+            glob::Pattern::new(p)
+                .map(|g| g.matches(name))
+                .unwrap_or(false)
+        })
+    };
     if matches(&env.cfg_str_list("shim-include")) {
         return false;
     }
@@ -466,7 +592,9 @@ pub fn shim_target(argv0: &str) -> Option<(PathBuf, String)> {
     } else {
         // invoked by bare name (e.g. `exec -a python`): look it up on PATH
         let p = std::env::var_os("PATH")?;
-        std::env::split_paths(&p).map(|d| d.join(&name)).find(|c| is_shim(c))?
+        std::env::split_paths(&p)
+            .map(|d| d.join(&name))
+            .find(|c| is_shim(c))?
     };
     let dir = path.parent()?.to_path_buf();
     if dir.join(SHIM_LINK).exists() {
@@ -483,12 +611,17 @@ pub fn shim_target(argv0: &str) -> Option<(PathBuf, String)> {
 fn path_without(path: &str, remove: &[PathBuf]) -> String {
     path.split(':')
         .filter(|p| !p.is_empty())
-        .filter(|p| !remove.iter().any(|r| crate::util::normalize(Path::new(p)) == crate::util::normalize(r)))
+        .filter(|p| {
+            !remove
+                .iter()
+                .any(|r| crate::util::normalize(Path::new(p)) == crate::util::normalize(r))
+        })
         .collect::<Vec<_>>()
         .join(":")
 }
 
-const RESTORE_PS1: &str = "if [ -n \"${_CVENV_OLD_PS1+x}\" ]; then PS1=\"$_CVENV_OLD_PS1\"; unset _CVENV_OLD_PS1; fi";
+const RESTORE_PS1: &str =
+    "if [ -n \"${_CVENV_OLD_PS1+x}\" ]; then PS1=\"$_CVENV_OLD_PS1\"; unset _CVENV_OLD_PS1; fi";
 
 pub fn activation_code(env: &Env) -> String {
     let mut remove = vec![env.shim_dir()];
@@ -510,7 +643,10 @@ pub fn activation_code(env: &Env) -> String {
         format!("export CVENV_MANIFEST={}", qp(&env.manifest)),
     ];
     if std::env::var_os("CVENV_NO_PROMPT").is_none() {
-        lines.push(format!("_CVENV_OLD_PS1=\"${{PS1-}}\"; PS1={}\"${{PS1-}}\"", q(&format!("({}) ", env.name))));
+        lines.push(format!(
+            "_CVENV_OLD_PS1=\"${{PS1-}}\"; PS1={}\"${{PS1-}}\"",
+            q(&format!("({}) ", env.name))
+        ));
     }
     lines.push("hash -r 2>/dev/null || true".into());
     lines.join("\n") + "\n"

@@ -1,11 +1,19 @@
 //! Building an env's image: definition file generation + `apptainer build`.
 
 use crate::config;
-use crate::env::{compute_fingerprint, cuda_requirement, stat_sig, Backend, Env, Kind, Meta, BUILD_CFG_KEYS};
-use crate::runtime::{find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims, HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT};
-use crate::util::{expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, sha256_bytes, username, warn, write_json};
-use std::collections::BTreeMap;
+use crate::env::{
+    compute_fingerprint, cuda_requirement, stat_sig, Backend, Env, Kind, Meta, BUILD_CFG_KEYS,
+};
+use crate::runtime::{
+    find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims,
+    HOST_ENV_DROP, IMG_ENVS, IMG_PIXI, IMG_ROOT,
+};
+use crate::util::{
+    expand, human_size, info, lock_file, now_iso, q, qp, remove_tree, sha256_bytes, username, warn,
+    write_json,
+};
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +22,14 @@ use std::time::Instant;
 
 /// (Bootstrap, From) for an image reference.
 pub fn parse_base_image(r: &str) -> (String, String) {
-    for kind in ["docker-daemon", "docker", "oras", "library", "shub", "localimage"] {
+    for kind in [
+        "docker-daemon",
+        "docker",
+        "oras",
+        "library",
+        "shub",
+        "localimage",
+    ] {
         if let Some(rest) = r.strip_prefix(&format!("{}://", kind)) {
             return (kind.to_string(), rest.to_string());
         }
@@ -27,14 +42,27 @@ pub fn parse_base_image(r: &str) -> (String, String) {
 
 /// `incremental_from`: start from this existing image of the env (only the pixi
 /// install delta is applied; post-commands already ran when it was built).
-fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool, incremental_from: Option<&Path>) -> String {
+fn make_deffile(
+    env: &Env,
+    pixi_host: &Path,
+    base: &str,
+    update: bool,
+    incremental_from: Option<&Path>,
+) -> String {
     let (bootstrap, from) = match incremental_from {
         Some(img) => ("localimage".to_string(), img.display().to_string()),
         None => parse_base_image(base),
     };
-    let post = if incremental_from.is_some() { vec![] } else { env.cfg_str_list("post-commands") };
+    let post = if incremental_from.is_some() {
+        vec![]
+    } else {
+        env.cfg_str_list("post-commands")
+    };
     let proj = env.manifest_dir();
-    let cuda = std::env::var("CONDA_OVERRIDE_CUDA").ok().filter(|s| !s.is_empty()).or_else(|| cuda_requirement(env));
+    let cuda = std::env::var("CONDA_OVERRIDE_CUDA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cuda_requirement(env));
     let mut l: Vec<String> = vec![
         format!("Bootstrap: {}", bootstrap),
         format!("From: {}", from),
@@ -72,7 +100,10 @@ fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool, increment
     }
     l.extend([
         "    mkdir -p /etc/pixi".to_string(),
-        format!("    printf 'detached-environments = \"{}\"\\n' > /etc/pixi/config.toml", IMG_ENVS),
+        format!(
+            "    printf 'detached-environments = \"{}\"\\n' > /etc/pixi/config.toml",
+            IMG_ENVS
+        ),
         format!("    PIXI={}", IMG_PIXI),
         format!("    M={}", qp(&env.manifest)),
         format!("    E={}", q(&env.pixi_env)),
@@ -119,7 +150,9 @@ fn make_deffile(env: &Env, pixi_host: &Path, base: &str, update: bool, increment
 
 /// `<build-tmpdir>/cvenv-$USER`: node-local scratch for builds and caches.
 pub fn build_tmp_root() -> Result<PathBuf> {
-    let base = config::value("build-tmpdir").map(|v| expand(&v)).unwrap_or_else(|| PathBuf::from("/tmp"));
+    let base = config::value("build-tmpdir")
+        .map(|v| expand(&v))
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
     let d = base.join(format!("cvenv-{}", username()));
     if !d.is_dir() {
         fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
@@ -133,7 +166,10 @@ fn default_base_image(pixi_host: &Path) -> String {
     if let Some(v) = config::value("base-image") {
         return v;
     }
-    format!("docker://ghcr.io/prefix-dev/pixi:{}", pixi_version(pixi_host).unwrap_or_else(|| "latest".into()))
+    format!(
+        "docker://ghcr.io/prefix-dev/pixi:{}",
+        pixi_version(pixi_host).unwrap_or_else(|| "latest".into())
+    )
 }
 
 /// Hash of what the image's base layer depends on (base image + build-relevant settings).
@@ -159,7 +195,10 @@ fn incremental_blocker(env: &Env, base_hash: &str) -> Option<String> {
         None => return Some("the previous image has no build metadata".into()),
     };
     if meta.build_cfg.as_deref() != Some(base_hash) {
-        return Some("the base image or post-commands changed (or the image predates incremental support)".into());
+        return Some(
+            "the base image or post-commands changed (or the image predates incremental support)"
+                .into(),
+        );
     }
     if crate::util::normalize(&meta.manifest) != crate::util::normalize(&env.manifest) {
         return Some("the env was moved since the last build".into());
@@ -173,9 +212,13 @@ fn incremental_blocker(env: &Env, base_hash: &str) -> Option<String> {
 /// Run `cmd`, copying its stdout+stderr to `log` and to our stderr.
 pub fn run_logged(cmd: &mut Command, log: &mut fs::File) -> Result<ExitStatus> {
     let (reader, writer) = std::io::pipe()?;
-    cmd.stdin(Stdio::null()).stdout(writer.try_clone()?).stderr(writer);
+    cmd.stdin(Stdio::null())
+        .stdout(writer.try_clone()?)
+        .stderr(writer);
     let prog = cmd.get_program().to_string_lossy().to_string();
-    let mut child = cmd.spawn().with_context(|| format!("could not run {}", prog))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("could not run {}", prog))?;
     // close our copies of the pipe's write end (they live in `cmd`)
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     let mut stderr = std::io::stderr();
@@ -188,9 +231,19 @@ pub fn run_logged(cmd: &mut Command, log: &mut fs::File) -> Result<ExitStatus> {
     Ok(child.wait()?)
 }
 
-pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: bool, incremental: bool, backend: Option<Backend>) -> Result<()> {
+pub fn build_env(
+    env: &Env,
+    update: bool,
+    fresh_cache: bool,
+    keep_build_dir: bool,
+    incremental: bool,
+    backend: Option<Backend>,
+) -> Result<()> {
     if env.unregistered {
-        bail!("env '{}' belongs to another user (or isn't registered); only its owner can rebuild it", env.name);
+        bail!(
+            "env '{}' belongs to another user (or isn't registered); only its owner can rebuild it",
+            env.name
+        );
     }
     match env.kind {
         Kind::Wrap => return crate::wrap::refresh_wrap(env),
@@ -226,7 +279,9 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     let cache = if fresh_cache {
         work.join("pixi-cache")
     } else {
-        config::value("pixi-cache").map(|v| expand(&v)).unwrap_or_else(|| tmp_root.join("pixi-cache"))
+        config::value("pixi-cache")
+            .map(|v| expand(&v))
+            .unwrap_or_else(|| tmp_root.join("pixi-cache"))
     };
     fs::create_dir_all(&cache)?;
 
@@ -236,7 +291,10 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     if incremental {
         match incremental_blocker(env, &base_hash) {
             None => from_image = Some(env.image()),
-            Some(why) => info(&format!("incremental build not possible ({}); doing a full build", why)),
+            Some(why) => info(&format!(
+                "incremental build not possible ({}); doing a full build",
+                why
+            )),
         }
     }
     let deffile = work.join("cvenv.def");
@@ -262,7 +320,11 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
         "building env '{}' (pixi env '{}'){}",
         env.name,
         env.pixi_env,
-        if from_image.is_some() { " incrementally from the current image" } else { "" }
+        if from_image.is_some() {
+            " incrementally from the current image"
+        } else {
+            ""
+        }
     ));
     info(&format!("  manifest   : {}", env.manifest.display()));
     info(&format!("  base image : {}", base));
@@ -270,8 +332,16 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     info(&format!("  image      : {}", env.image().display()));
     let t0 = Instant::now();
 
-    let mut log = fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
-    writeln!(log, "# {}\n# {} {}\n\n{}\n# ---- build output ----", now_iso(), app.display(), args.join(" "), def)?;
+    let mut log =
+        fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    writeln!(
+        log,
+        "# {}\n# {} {}\n\n{}\n# ---- build output ----",
+        now_iso(),
+        app.display(),
+        args.join(" "),
+        def
+    )?;
 
     let mut cmd = Command::new(&app);
     cmd.args(&args)
@@ -300,7 +370,11 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
     // Atomic swap: running jobs keep using the old (now unlinked) image.
     fs::rename(&partial, env.image())?;
     let bins: Vec<String> = match fs::read_to_string(out.join("bin-list")) {
-        Ok(s) => s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        Ok(s) => s
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
         Err(_) => {
             warn("could not read the list of executables from the build");
             vec![]
@@ -315,9 +389,15 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
 
     let image_size = fs::metadata(env.image())?.len();
     let fresh = Env::new(&env.name, &env.record()); // re-read the manifest: the build may have touched it
-    let prefix = fs::read_to_string(out.join("prefix")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let prefix = fs::read_to_string(out.join("prefix"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let exec_paths: BTreeMap<String, String> = match &prefix {
-        Some(p) => bins.iter().map(|b| (b.clone(), format!("{}/bin/{}", p, b))).collect(),
+        Some(p) => bins
+            .iter()
+            .map(|b| (b.clone(), format!("{}/bin/{}", p, b)))
+            .collect(),
         None => BTreeMap::new(),
     };
     let meta = Meta {
@@ -363,11 +443,17 @@ pub fn build_env(env: &Env, update: bool, fresh_cache: bool, keep_build_dir: boo
 
 /// State of a submitted Slurm build ("PENDING", "RUNNING", ...) if it is still queued/running.
 pub fn slurm_build_state(env: &Env) -> Option<(String, String)> {
-    let job = fs::read_to_string(env.art().join("slurm-job")).ok()?.trim().to_string();
+    let job = fs::read_to_string(env.art().join("slurm-job"))
+        .ok()?
+        .trim()
+        .to_string();
     if job.is_empty() {
         return None;
     }
-    let out = Command::new(crate::util::which("squeue")?).args(["-h", "-j", &job, "-o", "%T"]).output().ok()?;
+    let out = Command::new(crate::util::which("squeue")?)
+        .args(["-h", "-j", &job, "-o", "%T"])
+        .output()
+        .ok()?;
     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if state.is_empty() {
         None
@@ -402,10 +488,24 @@ pub fn is_building(env: &Env) -> bool {
 }
 
 /// Submit `cvenv rebuild --local` for `env` as a Slurm batch job.
-pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: bool, backend: Option<Backend>, extra: Option<&str>, wait: bool) -> Result<()> {
-    let sbatch = crate::util::which("sbatch").ok_or_else(|| anyhow::anyhow!("sbatch not found: Slurm builds need a Slurm cluster"))?;
+pub fn submit_slurm(
+    env: &Env,
+    update: bool,
+    fresh_cache: bool,
+    incremental: bool,
+    backend: Option<Backend>,
+    extra: Option<&str>,
+    wait: bool,
+) -> Result<()> {
+    let sbatch = crate::util::which("sbatch")
+        .ok_or_else(|| anyhow::anyhow!("sbatch not found: Slurm builds need a Slurm cluster"))?;
     if let Some((job, state)) = slurm_build_state(env) {
-        bail!("env '{}' is already being built by Slurm job {} ({})", env.name, job, state);
+        bail!(
+            "env '{}' is already being built by Slurm job {} ({})",
+            env.name,
+            job,
+            state
+        );
     }
     if is_building(env) {
         bail!("env '{}' is already being built", env.name);
@@ -441,7 +541,12 @@ pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: boo
     crate::util::write_atomic(&script, body.as_bytes(), Some(0o755))?;
 
     // defaults < `slurm-args` config < --slurm-args
-    let mut args: Vec<String> = vec!["--parsable".into(), "--cpus-per-task=8".into(), "--mem=32G".into(), "--time=02:00:00".into()];
+    let mut args: Vec<String> = vec![
+        "--parsable".into(),
+        "--cpus-per-task=8".into(),
+        "--mem=32G".into(),
+        "--time=02:00:00".into(),
+    ];
     if let Some(a) = crate::config::value("slurm-args") {
         args.extend(a.split_whitespace().map(String::from));
     }
@@ -453,7 +558,11 @@ pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: boo
     }
     args.push(script.to_string_lossy().to_string());
 
-    info(&format!("submitting build of '{}': sbatch {}", env.name, args.join(" ")));
+    info(&format!(
+        "submitting build of '{}': sbatch {}",
+        env.name,
+        args.join(" ")
+    ));
     let mut child = Command::new(&sbatch)
         .args(&args)
         .stdout(Stdio::piped())
@@ -467,16 +576,31 @@ pub fn submit_slurm(env: &Env, update: bool, fresh_cache: bool, incremental: boo
     if !job.is_empty() {
         let _ = fs::write(env.art().join("slurm-job"), format!("{}\n", job));
         let logfile = env.art().join(format!("build-{}.log", job));
-        info(&format!("job {} submitted; log: {}", job, logfile.display()));
+        info(&format!(
+            "job {} submitted; log: {}",
+            job,
+            logfile.display()
+        ));
         if wait {
             info("waiting for the job to finish (Ctrl-C stops waiting; the job keeps running)");
         } else {
-            info(&format!("follow it with: tail -f {}   (`cvenv envs` shows 'building' meanwhile)", logfile.display()));
+            info(&format!(
+                "follow it with: tail -f {}   (`cvenv envs` shows 'building' meanwhile)",
+                logfile.display()
+            ));
         }
     }
     let status = child.wait()?;
     if !status.success() {
-        bail!("sbatch failed ({}){}", status, if job.is_empty() { "" } else { "; see the job log" });
+        bail!(
+            "sbatch failed ({}){}",
+            status,
+            if job.is_empty() {
+                ""
+            } else {
+                "; see the job log"
+            }
+        );
     }
     if wait {
         info(&format!("build job {} finished", job));

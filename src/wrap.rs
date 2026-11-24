@@ -5,9 +5,17 @@
 
 use crate::build::{build_tmp_root, parse_base_image};
 use crate::config;
-use crate::env::{load_registry, update_registry, valid_name, Backend, Env, Kind, Meta, Record, WRAP_CFG};
-use crate::runtime::{find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims, HOST_ENV_DROP, INSTALL_SQFS};
-use crate::util::{expand, human_size, info, is_executable, is_under, lock_file, now_iso, realpath, remove_tree, warn, which, write_atomic, write_json};
+use crate::env::{
+    load_registry, update_registry, valid_name, Backend, Env, Kind, Meta, Record, WRAP_CFG,
+};
+use crate::runtime::{
+    find_apptainer, find_pixi, pixi_version, select_backend, write_layer, write_shims,
+    HOST_ENV_DROP, INSTALL_SQFS,
+};
+use crate::util::{
+    expand, human_size, info, is_executable, is_under, lock_file, now_iso, realpath, remove_tree,
+    warn, which, write_atomic, write_json,
+};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,8 +27,23 @@ use std::time::Instant;
 /// only interpreter/launcher-like names are exposed unless asked for explicitly.
 const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 const SYSTEM_ALLOW: &[&str] = &[
-    "python", "python3", "python3.*", "pip", "pip3", "pip3.*", "ipython*", "jupyter*", "torchrun",
-    "accelerate", "deepspeed", "huggingface-cli", "nvidia-smi", "nvcc", "Rscript", "R", "julia",
+    "python",
+    "python3",
+    "python3.*",
+    "pip",
+    "pip3",
+    "pip3.*",
+    "ipython*",
+    "jupyter*",
+    "torchrun",
+    "accelerate",
+    "deepspeed",
+    "huggingface-cli",
+    "nvidia-smi",
+    "nvcc",
+    "Rscript",
+    "R",
+    "julia",
 ];
 /// Marker written into a replaced installation directory (see `wrap-install --replace`).
 const STUB_MARKER: &str = ".cvenv-wrapped";
@@ -38,7 +61,17 @@ const WRAP_CFG_TEMPLATE: &str = "\
 ";
 
 fn is_remote(r: &str) -> bool {
-    ["docker://", "docker-daemon://", "oras://", "library://", "shub://", "http://", "https://"].iter().any(|p| r.starts_with(p))
+    [
+        "docker://",
+        "docker-daemon://",
+        "oras://",
+        "library://",
+        "shub://",
+        "http://",
+        "https://",
+    ]
+    .iter()
+    .any(|p| r.starts_with(p))
 }
 
 /// Run apptainer with all temporary/cache files on node-local scratch.
@@ -50,7 +83,12 @@ fn apptainer_cmd(app: &Path) -> Result<Command> {
     c.env("APPTAINER_TMPDIR", &work)
         .env("SINGULARITY_TMPDIR", &work)
         .env("TMPDIR", &work)
-        .env("APPTAINER_CACHEDIR", std::env::var("APPTAINER_CACHEDIR").map(PathBuf::from).unwrap_or_else(|_| tmp.join("apptainer-cache")));
+        .env(
+            "APPTAINER_CACHEDIR",
+            std::env::var("APPTAINER_CACHEDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| tmp.join("apptainer-cache")),
+        );
     for k in HOST_ENV_DROP {
         c.env_remove(k);
     }
@@ -73,14 +111,21 @@ fn fetch_image(source: &str, dest: &Path, link: bool) -> Result<()> {
         }
         let app = find_apptainer()?;
         info(&format!("pulling {}", source));
-        let r = apptainer_cmd(&app)?.arg("pull").arg("--force").arg(&partial).arg(source).status();
+        let r = apptainer_cmd(&app)?
+            .arg("pull")
+            .arg("--force")
+            .arg(&partial)
+            .arg(source)
+            .status();
         cleanup_pull_dir();
         if !r?.success() {
             let _ = fs::remove_file(&partial);
             bail!("`apptainer pull {}` failed", source);
         }
     } else {
-        let src = realpath(&expand(source.strip_prefix("localimage://").unwrap_or(source)));
+        let src = realpath(&expand(
+            source.strip_prefix("localimage://").unwrap_or(source),
+        ));
         if !src.is_file() {
             bail!("image not found: {}", src.display());
         }
@@ -97,9 +142,17 @@ fn fetch_image(source: &str, dest: &Path, link: bool) -> Result<()> {
 }
 
 /// Executables visible in the container: name -> absolute path inside the container.
-fn scan_container(image: &Path, bin_dirs: &[String], commands: &[String]) -> Result<BTreeMap<String, String>> {
+fn scan_container(
+    image: &Path,
+    bin_dirs: &[String],
+    commands: &[String],
+) -> Result<BTreeMap<String, String>> {
     let app = find_apptainer()?;
-    let dirs = if bin_dirs.is_empty() { "$PATH".to_string() } else { bin_dirs.join(":") };
+    let dirs = if bin_dirs.is_empty() {
+        "$PATH".to_string()
+    } else {
+        bin_dirs.join(":")
+    };
     let script = format!(
         "IFS=:; for d in {dirs}; do [ -d \"$d\" ] || continue; for f in \"$d\"/*; do \
          [ -f \"$f\" ] && [ -x \"$f\" ] && printf '%s\\t%s\\n' \"$d\" \"${{f##*/}}\"; done; done; \
@@ -120,7 +173,11 @@ fn scan_container(image: &Path, bin_dirs: &[String], commands: &[String]) -> Res
     if !out.status.success() {
         bail!("could not run the container to list its executables");
     }
-    let allow = |n: &str| SYSTEM_ALLOW.iter().any(|p| glob::Pattern::new(p).map(|g| g.matches(n)).unwrap_or(false));
+    let allow = |n: &str| {
+        SYSTEM_ALLOW
+            .iter()
+            .any(|p| glob::Pattern::new(p).map(|g| g.matches(n)).unwrap_or(false))
+    };
     let mut map = BTreeMap::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -131,7 +188,10 @@ fn scan_container(image: &Path, bin_dirs: &[String], commands: &[String]) -> Res
             [dir, name] => {
                 let system = bin_dirs.is_empty() && SYSTEM_DIRS.contains(dir);
                 if (!system || allow(name)) && !map.contains_key(*name) {
-                    map.insert(name.to_string(), format!("{}/{}", dir.trim_end_matches('/'), name));
+                    map.insert(
+                        name.to_string(),
+                        format!("{}/{}", dir.trim_end_matches('/'), name),
+                    );
                 }
             }
             _ => {}
@@ -142,13 +202,18 @@ fn scan_container(image: &Path, bin_dirs: &[String], commands: &[String]) -> Res
 
 fn new_env_dir(name: &str, path: Option<String>) -> Result<PathBuf> {
     if !valid_name(name) {
-        bail!("invalid env name '{}' (use letters, digits, '.', '_' and '-')", name);
+        bail!(
+            "invalid env name '{}' (use letters, digits, '.', '_' and '-')",
+            name
+        );
     }
     let reg = load_registry();
     if let Some(r) = reg.envs.get(name) {
         bail!("env '{}' already exists at {}", name, r.path.display());
     }
-    let dir = path.map(|p| expand(&p)).unwrap_or_else(|| config::store_dir().join(name));
+    let dir = path
+        .map(|p| expand(&p))
+        .unwrap_or_else(|| config::store_dir().join(name));
     for (n, r) in &reg.envs {
         if crate::util::normalize(&r.path) == crate::util::normalize(&dir) {
             bail!("{} is already used by env '{}'", dir.display(), n);
@@ -184,10 +249,22 @@ pub fn cmd_wrap(name: &str, source: &str, path: Option<String>, opts: WrapOpts) 
     if !cfg_file.exists() {
         fs::write(&cfg_file, WRAP_CFG_TEMPLATE)?;
     }
-    let env = Env::new(name, &Record { path: dir.clone(), manifest: cfg_file, kind: Kind::Wrap, pixi_env: "default".into(), created: None });
+    let env = Env::new(
+        name,
+        &Record {
+            path: dir.clone(),
+            manifest: cfg_file,
+            kind: Kind::Wrap,
+            pixi_env: "default".into(),
+            created: None,
+        },
+    );
     // keep the registry clean if pulling/scanning fails
     if let Err(e) = wrap_image(&env, source, &opts) {
-        warn(&format!("wrapping failed; nothing was registered ({} can be removed)", dir.display()));
+        warn(&format!(
+            "wrapping failed; nothing was registered ({} can be removed)",
+            dir.display()
+        ));
         return Err(e);
     }
     register(&env)?;
@@ -200,7 +277,11 @@ pub fn cmd_wrap(name: &str, source: &str, path: Option<String>, opts: WrapOpts) 
 }
 
 fn wrap_image(env: &Env, source: &str, opts: &WrapOpts) -> Result<()> {
-    let _lock = lock_file(&env.art().join(".build.lock"), false, &format!("env '{}'", env.name))?;
+    let _lock = lock_file(
+        &env.art().join(".build.lock"),
+        false,
+        &format!("env '{}'", env.name),
+    )?;
     let t0 = Instant::now();
     fetch_image(source, &env.image(), opts.link)?;
     let exec_paths = scan_container(&env.image(), &opts.bin_dirs, &opts.commands)?;
@@ -244,7 +325,10 @@ fn wrap_image(env: &Env, source: &str, opts: &WrapOpts) -> Result<()> {
 
 /// The commands that actually got a shim (some names are excluded by default).
 fn exposed(env: &Env, bins: &[String]) -> Vec<String> {
-    bins.iter().filter(|b| env.shim_dir().join(b.as_str()).exists()).cloned().collect()
+    bins.iter()
+        .filter(|b| env.shim_dir().join(b.as_str()).exists())
+        .cloned()
+        .collect()
 }
 
 fn preview(bins: &[String]) -> String {
@@ -257,10 +341,26 @@ fn preview(bins: &[String]) -> String {
 
 /// `cvenv rebuild` for a wrapped container: re-pull/re-copy the source and rescan.
 pub fn refresh_wrap(env: &Env) -> Result<()> {
-    let meta = env.meta().ok_or_else(|| anyhow::anyhow!("no metadata for wrapped env '{}'", env.name))?;
-    let source = meta.source.clone().ok_or_else(|| anyhow::anyhow!("wrapped env '{}' has no recorded source", env.name))?;
-    info(&format!("refreshing wrapped env '{}' from {}", env.name, source));
-    wrap_image(env, &source, &WrapOpts { link: meta.link, bin_dirs: meta.bin_dirs.clone(), commands: meta.commands.clone() })?;
+    let meta = env
+        .meta()
+        .ok_or_else(|| anyhow::anyhow!("no metadata for wrapped env '{}'", env.name))?;
+    let source = meta
+        .source
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("wrapped env '{}' has no recorded source", env.name))?;
+    info(&format!(
+        "refreshing wrapped env '{}' from {}",
+        env.name, source
+    ));
+    wrap_image(
+        env,
+        &source,
+        &WrapOpts {
+            link: meta.link,
+            bin_dirs: meta.bin_dirs.clone(),
+            commands: meta.commands.clone(),
+        },
+    )?;
     env.write_env_file()
 }
 
@@ -272,7 +372,11 @@ pub fn find_mksquashfs() -> Result<PathBuf> {
     if let Some(p) = which("mksquashfs") {
         return Ok(p);
     }
-    for c in ["/usr/sbin/mksquashfs", "/sbin/mksquashfs", "/usr/local/sbin/mksquashfs"] {
+    for c in [
+        "/usr/sbin/mksquashfs",
+        "/sbin/mksquashfs",
+        "/usr/local/sbin/mksquashfs",
+    ] {
         if is_executable(Path::new(c)) {
             return Ok(PathBuf::from(c));
         }
@@ -281,7 +385,12 @@ pub fn find_mksquashfs() -> Result<PathBuf> {
     if let Ok(app) = find_apptainer() {
         let base = realpath(&app);
         if let Some(root) = base.parent().and_then(Path::parent) {
-            for c in [root.join("utils/bin/mksquashfs"), root.join(std::env::consts::ARCH).join("utils/bin/mksquashfs"), root.join("libexec/apptainer/bin/mksquashfs")] {
+            for c in [
+                root.join("utils/bin/mksquashfs"),
+                root.join(std::env::consts::ARCH)
+                    .join("utils/bin/mksquashfs"),
+                root.join("libexec/apptainer/bin/mksquashfs"),
+            ] {
                 if is_executable(&c) {
                     return Ok(c);
                 }
@@ -295,7 +404,10 @@ fn squash(dir: &Path, out: &Path) -> Result<()> {
     let mk = find_mksquashfs()?;
     let partial = PathBuf::from(format!("{}.partial", out.display()));
     let _ = fs::remove_file(&partial);
-    info(&format!("squashing {} (this reads every file once; big trees take a while)", dir.display()));
+    info(&format!(
+        "squashing {} (this reads every file once; big trees take a while)",
+        dir.display()
+    ));
     let ok = Command::new(&mk)
         .arg(dir)
         .arg(&partial)
@@ -317,12 +429,18 @@ fn list_host_bins(root: &Path, bin_dirs: &[String]) -> BTreeMap<String, String> 
     for d in bin_dirs {
         let dir = root.join(d);
         if let Ok(rd) = fs::read_dir(&dir) {
-            let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            let mut names: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
             names.sort();
             for n in names {
                 let p = dir.join(&n);
                 // symlinks inside the tree may point to targets only valid when mounted; keep them
-                let exe = is_executable(&p) || fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+                let exe = is_executable(&p)
+                    || fs::symlink_metadata(&p)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false);
                 if exe && !map.contains_key(&n) {
                     map.insert(n.clone(), p.display().to_string());
                 }
@@ -339,7 +457,12 @@ pub struct InstallOpts {
     pub backend: Option<Backend>,
 }
 
-pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: InstallOpts) -> Result<()> {
+pub fn cmd_wrap_install(
+    name: &str,
+    tree: &str,
+    path: Option<String>,
+    opts: InstallOpts,
+) -> Result<()> {
     let tree = realpath(&expand(tree));
     if !tree.is_dir() {
         bail!("{} is not a directory", tree.display());
@@ -350,12 +473,22 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
     if tree == Path::new("/") || tree == crate::util::home() {
         bail!("refusing to wrap {}", tree.display());
     }
-    let env_dir_planned = path.clone().map(|p| expand(&p)).unwrap_or_else(|| config::store_dir().join(name));
+    let env_dir_planned = path
+        .clone()
+        .map(|p| expand(&p))
+        .unwrap_or_else(|| config::store_dir().join(name));
     if is_under(&env_dir_planned, &tree) || is_under(&tree, &env_dir_planned) {
-        bail!("the env directory ({}) and the wrapped tree must not contain each other", env_dir_planned.display());
+        bail!(
+            "the env directory ({}) and the wrapped tree must not contain each other",
+            env_dir_planned.display()
+        );
     }
     let bin_dirs = if opts.bin_dirs.is_empty() {
-        if tree.join("bin").is_dir() { vec!["bin".to_string()] } else { vec![] }
+        if tree.join("bin").is_dir() {
+            vec!["bin".to_string()]
+        } else {
+            vec![]
+        }
     } else {
         opts.bin_dirs.clone()
     };
@@ -364,7 +497,16 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
     if !cfg_file.exists() {
         fs::write(&cfg_file, WRAP_CFG_TEMPLATE)?;
     }
-    let env = Env::new(name, &Record { path: dir.clone(), manifest: cfg_file, kind: Kind::WrapInstall, pixi_env: "default".into(), created: None });
+    let env = Env::new(
+        name,
+        &Record {
+            path: dir.clone(),
+            manifest: cfg_file,
+            kind: Kind::WrapInstall,
+            pixi_env: "default".into(),
+            created: None,
+        },
+    );
     let backend = select_backend(None, opts.backend, Kind::WrapInstall)?;
     if backend == Backend::Squashfuse && opts.base_image.is_some() {
         warn("--base-image is ignored by the squashfuse backend (the tree runs on the host OS)");
@@ -372,12 +514,18 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
     let base = match &opts.base_image {
         Some(b) => b.clone(),
         None => config::value("base-image").unwrap_or_else(|| {
-            let ver = find_pixi().ok().and_then(|p| pixi_version(&p)).unwrap_or_else(|| "latest".into());
+            let ver = find_pixi()
+                .ok()
+                .and_then(|p| pixi_version(&p))
+                .unwrap_or_else(|| "latest".into());
             format!("docker://ghcr.io/prefix-dev/pixi:{}", ver)
         }),
     };
     if let Err(e) = install_image(&env, &tree, &base, &bin_dirs, backend) {
-        warn(&format!("wrap-install failed; nothing was registered ({} can be removed)", dir.display()));
+        warn(&format!(
+            "wrap-install failed; nothing was registered ({} can be removed)",
+            dir.display()
+        ));
         return Err(e);
     }
     register(&env)?;
@@ -395,13 +543,27 @@ pub fn cmd_wrap_install(name: &str, tree: &str, path: Option<String>, opts: Inst
     Ok(())
 }
 
-fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String], backend: Backend) -> Result<()> {
-    let _lock = lock_file(&env.art().join(".build.lock"), false, &format!("env '{}'", env.name))?;
+fn install_image(
+    env: &Env,
+    tree: &Path,
+    base: &str,
+    bin_dirs: &[String],
+    backend: Backend,
+) -> Result<()> {
+    let _lock = lock_file(
+        &env.art().join(".build.lock"),
+        false,
+        &format!("env '{}'", env.name),
+    )?;
     let t0 = Instant::now();
     let sif = env.art().join(crate::env::IMAGE_NAME);
     if backend == Backend::Apptainer {
         let (kind, _) = parse_base_image(base);
-        let base_ref = if kind == "localimage" || base.contains("://") { base.to_string() } else { format!("docker://{}", base) };
+        let base_ref = if kind == "localimage" || base.contains("://") {
+            base.to_string()
+        } else {
+            format!("docker://{}", base)
+        };
         fetch_image(&base_ref, &sif, false)?;
     }
     squash(tree, &env.art().join(INSTALL_SQFS))?;
@@ -412,11 +574,21 @@ fn install_image(env: &Env, tree: &Path, base: &str, bin_dirs: &[String], backen
     let bins: Vec<String> = exec_paths.keys().cloned().collect();
     let sqfs_size = fs::metadata(env.art().join(INSTALL_SQFS))?.len();
     let (size, files, apptainer, base) = if backend == Backend::Apptainer {
-        (fs::metadata(&sif)?.len() + sqfs_size, 2, find_apptainer()?.display().to_string(), base.to_string())
+        (
+            fs::metadata(&sif)?.len() + sqfs_size,
+            2,
+            find_apptainer()?.display().to_string(),
+            base.to_string(),
+        )
     } else {
         // switched from apptainer: the base image is not needed any more
         let _ = fs::remove_file(&sif);
-        (sqfs_size, 1, String::new(), "none (runs on the host OS)".to_string())
+        (
+            sqfs_size,
+            1,
+            String::new(),
+            "none (runs on the host OS)".to_string(),
+        )
     };
     let meta = Meta {
         kind: Kind::WrapInstall,
@@ -464,7 +636,12 @@ fn replace_with_stub(env: &Env, tree: &Path, bin_dirs: &[String]) -> Result<()> 
         fs::create_dir_all(tree)?;
         write_atomic(
             &tree.join(STUB_MARKER),
-            format!("This directory is a stub: its content lives in {} (cvenv env '{}').\n", env.art().join(INSTALL_SQFS).display(), env.name).as_bytes(),
+            format!(
+                "This directory is a stub: its content lives in {} (cvenv env '{}').\n",
+                env.art().join(INSTALL_SQFS).display(),
+                env.name
+            )
+            .as_bytes(),
             Some(0o644),
         )?;
         for d in bin_dirs {
@@ -481,12 +658,24 @@ fn replace_with_stub(env: &Env, tree: &Path, bin_dirs: &[String]) -> Result<()> 
         let _ = fs::rename(&backup, tree);
         return Err(e.context("creating the stub failed; the original tree was restored"));
     }
-    info(&format!("replaced {} with a stub; the original is at {}", tree.display(), backup.display()));
+    info(&format!(
+        "replaced {} with a stub; the original is at {}",
+        tree.display(),
+        backup.display()
+    ));
     println!(
         "Check that everything works, e.g.\n    cvenv run --env {n} {cmd}\n\
          then delete the original files to free the quota:\n    rm -rf {b}",
         n = env.name,
-        cmd = if env.meta().map(|m| m.bins.iter().any(|b| b == "python")).unwrap_or(false) { "python -c 'import sys; print(sys.prefix)'" } else { "<command>" },
+        cmd = if env
+            .meta()
+            .map(|m| m.bins.iter().any(|b| b == "python"))
+            .unwrap_or(false)
+        {
+            "python -c 'import sys; print(sys.prefix)'"
+        } else {
+            "<command>"
+        },
         b = crate::util::q(&backup.display().to_string())
     );
     Ok(())
@@ -499,7 +688,10 @@ pub fn relink_stub(env: &Env) {
             if tree.join(STUB_MARKER).exists() {
                 for d in &meta.bin_dirs {
                     let link = tree.join(d);
-                    if fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                    if fs::symlink_metadata(&link)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false)
+                    {
                         let _ = fs::remove_file(&link);
                         let _ = std::os::unix::fs::symlink(env.shim_dir(), &link);
                     }
@@ -511,8 +703,13 @@ pub fn relink_stub(env: &Env) {
 
 /// `cvenv rebuild` for a wrap-install env: re-squash the tree (if it still exists).
 pub fn refresh_install(env: &Env, backend: Option<Backend>) -> Result<()> {
-    let meta = env.meta().ok_or_else(|| anyhow::anyhow!("no metadata for env '{}'", env.name))?;
-    let tree = meta.install_path.clone().ok_or_else(|| anyhow::anyhow!("env '{}' has no recorded tree", env.name))?;
+    let meta = env
+        .meta()
+        .ok_or_else(|| anyhow::anyhow!("no metadata for env '{}'", env.name))?;
+    let tree = meta
+        .install_path
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("env '{}' has no recorded tree", env.name))?;
     if tree.join(STUB_MARKER).exists() || !tree.is_dir() {
         bail!(
             "the original tree of '{}' was replaced, so there is nothing to re-squash. \
@@ -525,11 +722,18 @@ pub fn refresh_install(env: &Env, backend: Option<Backend>) -> Result<()> {
         meta.base_image.clone()
     } else {
         config::value("base-image").unwrap_or_else(|| {
-            let ver = find_pixi().ok().and_then(|p| pixi_version(&p)).unwrap_or_else(|| "latest".into());
+            let ver = find_pixi()
+                .ok()
+                .and_then(|p| pixi_version(&p))
+                .unwrap_or_else(|| "latest".into());
             format!("docker://ghcr.io/prefix-dev/pixi:{}", ver)
         })
     };
-    info(&format!("re-squashing {} for '{}'", tree.display(), env.name));
+    info(&format!(
+        "re-squashing {} for '{}'",
+        tree.display(),
+        env.name
+    ));
     install_image(env, &tree, &base, &meta.bin_dirs, backend)?;
     env.write_env_file()
 }

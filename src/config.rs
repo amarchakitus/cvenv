@@ -9,25 +9,98 @@ use std::sync::OnceLock;
 
 /// (key, environment override, description)
 pub const KEYS: &[(&str, &str, &str)] = &[
-    ("store", "CVENV_STORE", "default directory in which new envs are created"),
-    ("backend", "CVENV_BACKEND", "image backend for builds: auto | apptainer | squashfuse"),
-    ("apptainer", "CVENV_APPTAINER", "apptainer (or singularity) executable"),
-    ("apptainer-conf", "CVENV_APPTAINER_CONF", "apptainer.conf (to detect site bind paths)"),
-    ("squashfuse", "CVENV_SQUASHFUSE", "squashfuse_ll (or squashfuse) executable"),
-    ("mount-timeout", "CVENV_MOUNT_TIMEOUT", "seconds an unused squashfuse mount stays (default 600)"),
-    ("mount-mode", "CVENV_MOUNT_MODE", "squashfuse mounts: auto (systemd if running) | systemd | direct"),
-    ("mount-root", "CVENV_MOUNT_ROOT", "where squashfuse images are mounted (default <store>/.cvenv-mnt)"),
-    ("mount-retention", "CVENV_MOUNT_RETENTION", "days before an old build's mount directory is removed (default 14)"),
-    ("pixi", "CVENV_PIXI", "pixi executable (also copied into images)"),
-    ("build-tmpdir", "CVENV_BUILD_TMPDIR", "node-local scratch dir for builds (default /tmp)"),
-    ("pixi-cache", "CVENV_PIXI_CACHE", "persistent package cache for builds"),
-    ("base-image", "CVENV_BASE_IMAGE", "default base image for builds"),
-    ("rebuild-mode", "CVENV_REBUILD_MODE", "where `cvenv rebuild` builds: local | slurm"),
-    ("slurm-args", "CVENV_SLURM_ARGS", "sbatch arguments for `cvenv rebuild --slurm`"),
-    ("repo", "CVENV_REPO", "GitHub repo that `cvenv self-update` installs releases from"),
+    (
+        "store",
+        "CVENV_STORE",
+        "default directory in which new envs are created",
+    ),
+    (
+        "backend",
+        "CVENV_BACKEND",
+        "image backend for builds: auto | apptainer | squashfuse",
+    ),
+    (
+        "apptainer",
+        "CVENV_APPTAINER",
+        "apptainer (or singularity) executable",
+    ),
+    (
+        "apptainer-conf",
+        "CVENV_APPTAINER_CONF",
+        "apptainer.conf (to detect site bind paths)",
+    ),
+    (
+        "squashfuse",
+        "CVENV_SQUASHFUSE",
+        "squashfuse_ll (or squashfuse) executable",
+    ),
+    (
+        "mount-timeout",
+        "CVENV_MOUNT_TIMEOUT",
+        "seconds an unused squashfuse mount stays (default 600)",
+    ),
+    (
+        "mount-mode",
+        "CVENV_MOUNT_MODE",
+        "squashfuse mounts: auto (systemd if running) | systemd | direct",
+    ),
+    (
+        "mount-root",
+        "CVENV_MOUNT_ROOT",
+        "where squashfuse images are mounted (default <store>/.cvenv-mnt)",
+    ),
+    (
+        "mount-retention",
+        "CVENV_MOUNT_RETENTION",
+        "days before an old build's mount directory is removed (default 14)",
+    ),
+    (
+        "pixi",
+        "CVENV_PIXI",
+        "pixi executable (also copied into images)",
+    ),
+    (
+        "build-tmpdir",
+        "CVENV_BUILD_TMPDIR",
+        "node-local scratch dir for builds (default /tmp)",
+    ),
+    (
+        "pixi-cache",
+        "CVENV_PIXI_CACHE",
+        "persistent package cache for builds",
+    ),
+    (
+        "base-image",
+        "CVENV_BASE_IMAGE",
+        "default base image for builds",
+    ),
+    (
+        "rebuild-mode",
+        "CVENV_REBUILD_MODE",
+        "where `cvenv rebuild` builds: local | slurm",
+    ),
+    (
+        "slurm-args",
+        "CVENV_SLURM_ARGS",
+        "sbatch arguments for `cvenv rebuild --slurm`",
+    ),
+    (
+        "repo",
+        "CVENV_REPO",
+        "GitHub repo that `cvenv self-update` installs releases from",
+    ),
 ];
 
-pub const PATH_KEYS: &[&str] = &["store", "apptainer", "apptainer-conf", "squashfuse", "mount-root", "pixi", "build-tmpdir", "pixi-cache"];
+pub const PATH_KEYS: &[&str] = &[
+    "store",
+    "apptainer",
+    "apptainer-conf",
+    "squashfuse",
+    "mount-root",
+    "pixi",
+    "build-tmpdir",
+    "pixi-cache",
+];
 
 pub fn key_env(key: &str) -> Option<&'static str> {
     KEYS.iter().find(|k| k.0 == key).map(|k| k.1)
@@ -76,7 +149,9 @@ pub fn repo_dir() -> Option<PathBuf> {
 
 fn unquote_shell(v: &str) -> String {
     let v = v.trim();
-    if v.len() >= 2 && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\''))) {
+    if v.len() >= 2
+        && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
+    {
         return v[1..v.len() - 1].to_string();
     }
     // printf %q style backslash escapes
@@ -155,7 +230,9 @@ pub fn value(key: &str) -> Option<String> {
 }
 
 pub fn store_dir() -> PathBuf {
-    value("store").map(|v| expand(&v)).unwrap_or_else(|| home().join(".cvenv").join("envs"))
+    value("store")
+        .map(|v| expand(&v))
+        .unwrap_or_else(|| home().join(".cvenv").join("envs"))
 }
 
 pub fn set_value(key: &str, val: Option<&str>) -> Result<()> {

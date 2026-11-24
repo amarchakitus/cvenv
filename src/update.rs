@@ -51,7 +51,11 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 fn normalize_tag(v: &str) -> String {
     let v = v.trim();
-    if v.starts_with('v') { v.to_string() } else { format!("v{}", v) }
+    if v.starts_with('v') {
+        v.to_string()
+    } else {
+        format!("v{}", v)
+    }
 }
 
 /// The tag in a `.../releases/tag/<tag>` URL.
@@ -64,9 +68,23 @@ fn tag_from_url(url: &str) -> Option<String> {
 fn download(url: &str, dest: &Path) -> Result<()> {
     let ok = if let Some(curl) = which("curl") {
         // -s without -S: cvenv reports failures itself
-        Command::new(curl).args(["-fsL", "--retry", "3", "-o"]).arg(dest).arg(url).stdin(Stdio::null()).stderr(Stdio::null()).status()?.success()
+        Command::new(curl)
+            .args(["-fsL", "--retry", "3", "-o"])
+            .arg(dest)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success()
     } else if let Some(wget) = which("wget") {
-        Command::new(wget).args(["-q", "-O"]).arg(dest).arg(url).stdin(Stdio::null()).stderr(Stdio::null()).status()?.success()
+        Command::new(wget)
+            .args(["-q", "-O"])
+            .arg(dest)
+            .arg(url)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success()
     } else {
         bail!("curl or wget is needed to download updates");
     };
@@ -82,21 +100,41 @@ fn download(url: &str, dest: &Path) -> Result<()> {
 fn latest_tag(base: &str) -> Result<String> {
     if let Some(curl) = which("curl") {
         let out = Command::new(curl)
-            .args(["-fsSLI", "--retry", "3", "-o", "/dev/null", "-w", "%{url_effective}"])
+            .args([
+                "-fsSLI",
+                "--retry",
+                "3",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{url_effective}",
+            ])
             .arg(format!("{}/latest", base))
             .stdin(Stdio::null())
             .output()?;
-        if let Some(tag) = out.status.success().then(|| tag_from_url(&String::from_utf8_lossy(&out.stdout))).flatten() {
+        if let Some(tag) = out
+            .status
+            .success()
+            .then(|| tag_from_url(&String::from_utf8_lossy(&out.stdout)))
+            .flatten()
+        {
             return Ok(tag);
         }
     }
-    if let Some(repo) = base.strip_prefix("https://github.com/").and_then(|r| r.strip_suffix("/releases")) {
+    if let Some(repo) = base
+        .strip_prefix("https://github.com/")
+        .and_then(|r| r.strip_suffix("/releases"))
+    {
         let tmp = std::env::temp_dir().join(format!("cvenv-latest-{}.json", std::process::id()));
-        let res = download(&format!("https://api.github.com/repos/{}/releases/latest", repo), &tmp);
+        let res = download(
+            &format!("https://api.github.com/repos/{}/releases/latest", repo),
+            &tmp,
+        );
         let text = fs::read_to_string(&tmp).unwrap_or_default();
         let _ = fs::remove_file(&tmp);
         res?;
-        let v: serde_json::Value = serde_json::from_str(&text).context("parsing the GitHub API response")?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).context("parsing the GitHub API response")?;
         if let Some(t) = v.get("tag_name").and_then(|t| t.as_str()) {
             return Ok(t.to_string());
         }
@@ -117,23 +155,43 @@ impl Drop for TempFile {
 /// Download release `tag` from `base`, verify it and atomically replace `target` with it.
 /// Returns the new binary's version string. On any error `target` is left untouched.
 pub fn install_release(base: &str, tag: &str, triple: &str, target: &Path) -> Result<String> {
-    let dir = target.parent().ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
+    let dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
     let url = format!("{}/download/{}/cvenv-{}", base, tag, triple);
-    let new = TempFile(Some(dir.join(format!(".cvenv-update-{}", std::process::id()))));
-    let sum = TempFile(Some(dir.join(format!(".cvenv-update-{}.sha256", std::process::id()))));
+    let new = TempFile(Some(
+        dir.join(format!(".cvenv-update-{}", std::process::id())),
+    ));
+    let sum = TempFile(Some(
+        dir.join(format!(".cvenv-update-{}.sha256", std::process::id())),
+    ));
     let (new_path, sum_path) = (new.0.clone().unwrap(), sum.0.clone().unwrap());
 
-    download(&url, &new_path).with_context(|| format!("release {} has no binary for {}", tag, triple))?;
-    download(&format!("{}.sha256", url), &sum_path).context("the release publishes no checksum; refusing to install it")?;
-    let want = fs::read_to_string(&sum_path)?.split_whitespace().next().unwrap_or_default().to_lowercase();
+    download(&url, &new_path)
+        .with_context(|| format!("release {} has no binary for {}", tag, triple))?;
+    download(&format!("{}.sha256", url), &sum_path)
+        .context("the release publishes no checksum; refusing to install it")?;
+    let want = fs::read_to_string(&sum_path)?
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
     let got = sha256_file(&new_path)?;
     if want != got {
-        bail!("checksum mismatch for {} (expected {}, got {})", url, want, got);
+        bail!(
+            "checksum mismatch for {} (expected {}, got {})",
+            url,
+            want,
+            got
+        );
     }
 
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&new_path, fs::Permissions::from_mode(0o755))?;
-    let out = Command::new(&new_path).arg("--version").stdin(Stdio::null()).output();
+    let out = Command::new(&new_path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output();
     let version = match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => bail!("the downloaded binary does not run on this machine"),
@@ -164,7 +222,12 @@ pub fn self_update(check: bool, version: Option<String>, force: bool) -> Result<
     let current = env!("CARGO_PKG_VERSION");
     let exe = config::exe_path();
     let base = releases_url();
-    let triple = triple().ok_or_else(|| anyhow!("no prebuilt binaries for {}; build from source", std::env::consts::ARCH))?;
+    let triple = triple().ok_or_else(|| {
+        anyhow!(
+            "no prebuilt binaries for {}; build from source",
+            std::env::consts::ARCH
+        )
+    })?;
 
     let explicit = version.is_some();
     let tag = match version {
@@ -175,18 +238,28 @@ pub fn self_update(check: bool, version: Option<String>, force: bool) -> Result<
     let same = parse_version(&tag) == parse_version(current);
     if check {
         if newer {
-            println!("cvenv {} is available (installed: {}). Update with `cvenv self-update`.", tag.trim_start_matches('v'), current);
+            println!(
+                "cvenv {} is available (installed: {}). Update with `cvenv self-update`.",
+                tag.trim_start_matches('v'),
+                current
+            );
         } else {
             println!("cvenv {} is up to date.", current);
         }
         return Ok(());
     }
     if !explicit && !newer && !force {
-        info(&format!("cvenv {} is up to date (latest release: {})", current, tag));
+        info(&format!(
+            "cvenv {} is up to date (latest release: {})",
+            current, tag
+        ));
         return Ok(());
     }
     if explicit && same && !force {
-        info(&format!("cvenv {} is already installed (use --force to reinstall it)", current));
+        info(&format!(
+            "cvenv {} is already installed (use --force to reinstall it)",
+            current
+        ));
         return Ok(());
     }
     if let Some(repo) = config::repo_dir() {
@@ -237,15 +310,30 @@ mod tests {
 
     #[test]
     fn action_messages() {
-        assert_eq!(action_message("0.4.0", "v0.5.0"), ("updating cvenv 0.4.0 -> 0.5.0".to_string(), false));
-        assert_eq!(action_message("0.4.0", "v0.4.0"), ("reinstalling cvenv 0.4.0".to_string(), false));
-        assert_eq!(action_message("0.4.0", "v0.3.0"), ("downgrading cvenv 0.4.0 -> 0.3.0".to_string(), true));
+        assert_eq!(
+            action_message("0.4.0", "v0.5.0"),
+            ("updating cvenv 0.4.0 -> 0.5.0".to_string(), false)
+        );
+        assert_eq!(
+            action_message("0.4.0", "v0.4.0"),
+            ("reinstalling cvenv 0.4.0".to_string(), false)
+        );
+        assert_eq!(
+            action_message("0.4.0", "v0.3.0"),
+            ("downgrading cvenv 0.4.0 -> 0.3.0".to_string(), true)
+        );
     }
 
     #[test]
     fn latest_redirect() {
-        assert_eq!(tag_from_url("https://github.com/o/r/releases/tag/v0.3.0").as_deref(), Some("v0.3.0"));
-        assert_eq!(tag_from_url("https://github.com/o/r/releases/tag/v0.3.0/\n").as_deref(), Some("v0.3.0"));
+        assert_eq!(
+            tag_from_url("https://github.com/o/r/releases/tag/v0.3.0").as_deref(),
+            Some("v0.3.0")
+        );
+        assert_eq!(
+            tag_from_url("https://github.com/o/r/releases/tag/v0.3.0/\n").as_deref(),
+            Some("v0.3.0")
+        );
         assert_eq!(tag_from_url("https://github.com/o/r/releases"), None);
     }
 
@@ -256,7 +344,11 @@ mod tests {
 
     impl FakeRelease {
         fn new(name: &str) -> FakeRelease {
-            let root = std::env::temp_dir().join(format!("cvenv-test-update-{}-{}", name, std::process::id()));
+            let root = std::env::temp_dir().join(format!(
+                "cvenv-test-update-{}-{}",
+                name,
+                std::process::id()
+            ));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(root.join("install")).unwrap();
             FakeRelease { root }
@@ -270,8 +362,16 @@ mod tests {
             fs::create_dir_all(&d).unwrap();
             let bin = d.join("cvenv-test-triple");
             fs::write(&bin, script).unwrap();
-            let sum = if bad_sum { "0".repeat(64) } else { sha256_file(&bin).unwrap() };
-            fs::write(d.join("cvenv-test-triple.sha256"), format!("{}  cvenv-test-triple\n", sum)).unwrap();
+            let sum = if bad_sum {
+                "0".repeat(64)
+            } else {
+                sha256_file(&bin).unwrap()
+            };
+            fs::write(
+                d.join("cvenv-test-triple.sha256"),
+                format!("{}  cvenv-test-triple\n", sum),
+            )
+            .unwrap();
         }
         fn target(&self) -> PathBuf {
             let t = self.root.join("install/cvenv");
@@ -289,7 +389,12 @@ mod tests {
     }
 
     fn no_leftovers(dir: &Path) -> bool {
-        fs::read_dir(dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(".cvenv-update"))
+        fs::read_dir(dir).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".cvenv-update")
+        })
     }
 
     #[test]
@@ -316,10 +421,20 @@ mod tests {
         r.publish("v1.0.0", "#!/bin/sh\necho 'cvenv 1.0.0'\n", true); // wrong checksum
         r.publish("v2.0.0", "#!/bin/sh\nexit 1\n", false); // doesn't run
         r.publish("v3.0.0", "#!/bin/sh\necho 'cvenv 2.9.0'\n", false); // wrong version
-        for (tag, why) in [("v1.0.0", "checksum"), ("v2.0.0", "does not run"), ("v3.0.0", "reports"), ("v4.0.0", "no binary")] {
+        for (tag, why) in [
+            ("v1.0.0", "checksum"),
+            ("v2.0.0", "does not run"),
+            ("v3.0.0", "reports"),
+            ("v4.0.0", "no binary"),
+        ] {
             let e = install_release(&r.base(), tag, "test-triple", &t).unwrap_err();
             assert!(format!("{:#}", e).contains(why), "{}: {:#}", tag, e);
-            assert_eq!(fs::read_to_string(&t).unwrap(), "old binary", "{} touched the binary", tag);
+            assert_eq!(
+                fs::read_to_string(&t).unwrap(),
+                "old binary",
+                "{} touched the binary",
+                tag
+            );
         }
         assert!(no_leftovers(t.parent().unwrap()));
     }

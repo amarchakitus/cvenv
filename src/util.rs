@@ -48,7 +48,8 @@ pub fn die(msg: &str, code: i32) -> ! {
 /// POSIX shell quoting.
 pub fn q(s: &str) -> String {
     if !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
     {
         s.to_string()
     } else {
@@ -61,7 +62,9 @@ pub fn qp(p: &Path) -> String {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Lexically normalise a path (no symlink resolution).
@@ -93,7 +96,10 @@ fn expand_vars(s: &str) -> String {
         if chars[i] == '$' && i + 1 < chars.len() {
             let (name, next) = if chars[i + 1] == '{' {
                 match chars[i + 2..].iter().position(|&c| c == '}') {
-                    Some(end) => (chars[i + 2..i + 2 + end].iter().collect::<String>(), i + 3 + end),
+                    Some(end) => (
+                        chars[i + 2..i + 2 + end].iter().collect::<String>(),
+                        i + 3 + end,
+                    ),
                     None => (String::new(), i),
                 }
             } else {
@@ -134,7 +140,11 @@ pub fn absolute(p: &Path) -> PathBuf {
     if p.is_absolute() {
         normalize(p)
     } else {
-        normalize(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).join(p))
+        normalize(
+            &std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("/"))
+                .join(p),
+        )
     }
 }
 
@@ -174,7 +184,11 @@ pub fn human_size(n: u64) -> String {
     let mut v = n as f64;
     for unit in ["B", "K", "M", "G", "T"] {
         if v < 1024.0 || unit == "T" {
-            return if unit == "B" { format!("{}B", n) } else { format!("{:.1}{}", v, unit) };
+            return if unit == "B" {
+                format!("{}B", n)
+            } else {
+                format!("{:.1}{}", v, unit)
+            };
         }
         v /= 1024.0;
     }
@@ -188,7 +202,9 @@ pub fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     let tmp = dir.join(format!(
         ".tmp-{}-{}",
         std::process::id(),
-        path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+        path.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
     ));
     {
         let mut f = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
@@ -199,7 +215,8 @@ pub fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(m))?;
     }
-    fs::rename(&tmp, path).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -234,7 +251,11 @@ pub fn lock_file(path: &Path, blocking: bool, what: &str) -> Result<FileLock> {
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::EWOULDBLOCK) | Some(libc::EACCES) => {
-                bail!("{} is locked by another cvenv process ({})", what, path.display())
+                bail!(
+                    "{} is locked by another cvenv process ({})",
+                    what,
+                    path.display()
+                )
             }
             // filesystems without flock support: carry on unlocked
             _ => {}
@@ -249,7 +270,11 @@ pub fn remove_tree(p: &Path) {
     if fs::remove_dir_all(p).is_ok() || !p.exists() {
         return;
     }
-    let _ = std::process::Command::new("chmod").arg("-R").arg("u+rwX").arg(p).status();
+    let _ = std::process::Command::new("chmod")
+        .arg("-R")
+        .arg("u+rwX")
+        .arg(p)
+        .status();
     let _ = fs::remove_dir_all(p);
 }
 
@@ -267,16 +292,22 @@ pub fn which(name: &str) -> Option<PathBuf> {
 pub fn is_writable(p: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    CString::new(p.as_os_str().as_bytes()).map(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }).unwrap_or(false)
+    CString::new(p.as_os_str().as_bytes())
+        .map(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 })
+        .unwrap_or(false)
 }
 
 pub fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 pub fn now_iso() -> String {
-    chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z").to_string()
+    chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%z")
+        .to_string()
 }
 
 pub fn username() -> String {
