@@ -47,23 +47,23 @@ For a GPU env, declare the CUDA version: `cvenv init gpuenv --cuda 12.0 python=3
 
 | Command | Description |
 |---|---|
-| `cvenv init NAME [PKG…]` | Create an env in `<store>/NAME` (`--path DIR`, `--cuda VER`, `-c CHANNEL`) |
-| `cvenv init NAME --import FILE` | Create an env from `environment.yml` or `requirements.txt` |
-| `cvenv init NAME --manifest PATH` | Register an existing `pixi.toml` or `pyproject.toml` |
-| `cvenv wrap NAME IMAGE` | Use an existing container: `.sif`, `docker://…`, `oras://…` |
-| `cvenv wrap-install NAME DIR` | Pack an existing installation, such as a conda env, into one file |
-| `cvenv activate [NAME]`, `cvenv deactivate` | Put the env's commands on `PATH`, or remove them |
-| `cvenv add …`, `cvenv remove …` | Change dependencies (pixi syntax); takes effect on rebuild |
-| `cvenv rebuild` | Build the image (`--slurm`, `--incremental`, `--update`, `--backend`) |
-| `cvenv run CMD…` | Run a command or pixi task in the env |
-| `cvenv shell` | Start an interactive shell in the env |
-| `cvenv envs` | List envs and their status |
-| `cvenv info`, `cvenv list [PATTERN]` | Show env details, or installed packages |
-| `cvenv task …` | Manage pixi tasks |
-| `cvenv move NAME DEST` | Move an env to another directory |
-| `cvenv share NAME`, `cvenv register PATH` | Share an env with your group, or add a shared one |
-| `cvenv unregister NAME [--delete]` | Forget an env, optionally deleting its files |
-| `cvenv config [get\|set\|unset KEY [VALUE]]` | Show or change settings |
+| `cvenv init NAME [PKG…]` | Creates an env in `<store>/NAME` (`--path DIR`, `--cuda VER`, `-c CHANNEL`) |
+| `cvenv init NAME --import FILE` | Creates an env from `environment.yml` or `requirements.txt` |
+| `cvenv init NAME --manifest PATH` | Registers an existing `pixi.toml` or `pyproject.toml` |
+| `cvenv wrap NAME IMAGE` | Uses an existing container: `.sif`, `docker://…`, `oras://…` |
+| `cvenv wrap-install NAME DIR` | Packs an existing installation, such as a conda env, into one file |
+| `cvenv activate [NAME]`, `cvenv deactivate` | Puts the env's commands on `PATH`, or remove them |
+| `cvenv add …`, `cvenv remove …` | Changes dependencies (pixi syntax); takes effect on rebuild |
+| `cvenv rebuild` | Builds the image (`--slurm`, `--incremental`, `--update`, `--backend`) |
+| `cvenv run CMD…` | Runs a command or pixi task in the env |
+| `cvenv shell` | Starts an interactive shell in the env |
+| `cvenv envs` | Lists envs and their status |
+| `cvenv info`, `cvenv list [PATTERN]` | Shows env details, or installed packages |
+| `cvenv task …` | Manages pixi tasks |
+| `cvenv move NAME DEST` | Moves an env to another directory |
+| `cvenv share NAME`, `cvenv register PATH` | Shares an env with your group, or add a shared one |
+| `cvenv unregister NAME [--delete]` | Forgets an env, optionally deleting its files |
+| `cvenv config [get\|set\|unset KEY [VALUE]]` | Shows or changes settings |
 
 Commands act on the env given by `--env NAME` (or `--env /path/to/env`), otherwise on the active
 env or the env whose directory you are in. `cvenv agent-guide` prints a usage guide for AI
