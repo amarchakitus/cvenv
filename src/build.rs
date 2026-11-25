@@ -162,6 +162,26 @@ pub fn build_tmp_root() -> Result<PathBuf> {
     Ok(d)
 }
 
+/// The bind-path variable for `app` (SingularityCE reads SINGULARITY_BINDPATH; setting both
+/// makes Apptainer complain) and its value: binds already set by the site or user, then ours.
+fn build_bind_path(app: &Path, binds: &[String]) -> (&'static str, String) {
+    let singularity = app
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("singularity"));
+    let var = if singularity {
+        "SINGULARITY_BINDPATH"
+    } else {
+        "APPTAINER_BINDPATH"
+    };
+    let existing = std::env::var(var).ok().filter(|v| !v.trim().is_empty());
+    let value = existing
+        .into_iter()
+        .chain(binds.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(",");
+    (var, value)
+}
+
 fn default_base_image(pixi_host: &Path) -> String {
     if let Some(v) = config::value("base-image") {
         return v;
@@ -306,15 +326,20 @@ pub fn build_env(
     let args: Vec<String> = vec![
         "build".into(),
         "--force".into(),
-        "--bind".into(),
-        env.manifest_dir().to_string_lossy().to_string(),
-        "--bind".into(),
-        format!("{}:/cvenv-build/cache", cache.display()),
-        "--bind".into(),
-        format!("{}:/cvenv-build/out", out.display()),
         partial.to_string_lossy().to_string(),
         deffile.to_string_lossy().to_string(),
     ];
+    // Binds for %post go through APPTAINER_BINDPATH, not `build --bind`: Apptainer passes
+    // `build --bind` paths to the nested %post exec both as -B and as APPTAINER_BINDPATH,
+    // so each would be mounted twice ("destination is already in the mount point list").
+    let (bind_var, bind_path) = build_bind_path(
+        &app,
+        &[
+            env.manifest_dir().to_string_lossy().to_string(),
+            format!("{}:/cvenv-build/cache", cache.display()),
+            format!("{}:/cvenv-build/out", out.display()),
+        ],
+    );
 
     info(&format!(
         "building env '{}' (pixi env '{}'){}",
@@ -336,8 +361,10 @@ pub fn build_env(
         fs::File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
     writeln!(
         log,
-        "# {}\n# {} {}\n\n{}\n# ---- build output ----",
+        "# {}\n# {}={} {} {}\n\n{}\n# ---- build output ----",
         now_iso(),
+        bind_var,
+        bind_path,
         app.display(),
         args.join(" "),
         def
@@ -350,7 +377,8 @@ pub fn build_env(
         // keep those (many) files on node-local disk, never on the quota'd filesystem.
         .env("APPTAINER_TMPDIR", &work)
         .env("SINGULARITY_TMPDIR", &work)
-        .env("TMPDIR", &work);
+        .env("TMPDIR", &work)
+        .env(bind_var, &bind_path);
     for k in HOST_ENV_DROP {
         cmd.env_remove(k);
     }
@@ -606,4 +634,24 @@ pub fn submit_slurm(
         info(&format!("build job {} finished", job));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_path_variable_and_value() {
+        let binds = ["/a".to_string(), "/c:/cvenv-build/cache".to_string()];
+        // the variable matches the executable; nothing set beforehand in the test env
+        std::env::remove_var("APPTAINER_BINDPATH");
+        std::env::remove_var("SINGULARITY_BINDPATH");
+        let (v, val) = build_bind_path(Path::new("/usr/bin/apptainer"), &binds);
+        assert_eq!(
+            (v, val.as_str()),
+            ("APPTAINER_BINDPATH", "/a,/c:/cvenv-build/cache")
+        );
+        let (v, _) = build_bind_path(Path::new("/opt/bin/singularity"), &binds);
+        assert_eq!(v, "SINGULARITY_BINDPATH");
+    }
 }
