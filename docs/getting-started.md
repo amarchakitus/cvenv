@@ -217,7 +217,7 @@ cvenv rebuild                # or: cvenv rebuild --slurm --wait
 `cvenv config` shows every setting and where its value comes from; see
 [configuration](configuration.md) for the full list.
 
-## Next steps
+# Next steps
 
 - [README](../README.md): all commands, sharing envs with your group, prebuilt containers
   (`cvenv wrap docker://…`).
