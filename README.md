@@ -29,6 +29,13 @@ For a non-interactive install:
 Update with `cvenv self-update`. Re-running the installer also works and refreshes pixi and
 squashfuse; your settings are kept either way. See `./installation.sh --help` for all options.
 
+Release binaries (after v0.5.0) carry signed build provenance. To check that a binary
+downloaded from the releases page was built by this repository's CI:
+
+```bash
+gh attestation verify cvenv-x86_64-unknown-linux-gnu --repo amarchakitus/cvenv
+```
+
 ## Quick start
 
 New to cvenv? The [getting started tutorial](docs/getting-started.md) walks through it for
