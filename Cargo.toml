@@ -4,6 +4,11 @@ version = "0.5.0"
 edition = "2021"
 description = "pixi environments packed into single-file images (Apptainer or squashfuse)"
 license = "Apache-2.0"
+repository = "https://github.com/amarchakitus/cvenv"
+homepage = "https://github.com/amarchakitus/cvenv"
+readme = "README.md"
+keywords = ["pixi", "conda", "apptainer", "hpc", "squashfs"]
+categories = ["command-line-utilities", "development-tools", "science"]
 rust-version = "1.88"
 
 [dependencies]
