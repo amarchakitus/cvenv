@@ -1,0 +1,88 @@
+name: Bug report
+description: Report something that doesn't work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. The output requested below often contains paths, user
+        names and Slurm account names; redact them if needed. For security issues, use
+        [private vulnerability reporting](https://github.com/amarchakitus/cvenv/security/advisories/new)
+        instead of a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what did cvenv do? Include the full error message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands that trigger the problem, starting from a fresh env if possible.
+      placeholder: |
+        cvenv init myenv python=3.12 numpy
+        cvenv rebuild --env myenv
+        cvenv run --env myenv python -c "import numpy"
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: cvenv version
+      description: Output of `cvenv --version`.
+      placeholder: cvenv 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: The env's backend, as shown by `cvenv envs` or `cvenv info`.
+      options:
+        - apptainer
+        - squashfuse
+        - not sure / not env-specific
+    validations:
+      required: true
+  - type: textarea
+    id: info
+    attributes:
+      label: Env details
+      description: Output of `cvenv info --env NAME`, if the problem concerns a specific env.
+      render: text
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Output of `cvenv config`.
+      render: text
+  - type: textarea
+    id: build-log
+    attributes:
+      label: Build log
+      description: >-
+        For build failures, the relevant part of `<env>/.cvenv/build.log`
+        (or `build-<jobid>.log` for Slurm builds).
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: OS, cluster and scheduler
+      description: Linux distribution and version, cluster or site if you can share it, and scheduler.
+      placeholder: Rocky Linux 8.10, Slurm 23.11, Lustre store
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Workarounds you tried, whether it worked in an earlier version, etc.
