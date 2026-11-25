@@ -119,26 +119,30 @@ jobs:
           path: dist/*
           retention-days: 7
 
-  # The real workflows (scripts/e2e.sh) with the x86_64 binary built above, once per backend.
+  # The real workflows (scripts/e2e.sh) with the release binaries built above: both backends
+  # on x86_64, and squashfuse on aarch64 (catches x86-only assumptions, e.g. linux-64 manifests).
   e2e:
-    name: e2e (${{ matrix.backend }})
+    name: e2e (${{ matrix.backend }}, ${{ matrix.arch }})
     needs: binaries
     strategy:
       fail-fast: false
       matrix:
-        backend: [squashfuse, apptainer]
-    runs-on: ubuntu-24.04
+        include:
+          - { backend: squashfuse, arch: x86_64, runner: ubuntu-24.04 }
+          - { backend: apptainer, arch: x86_64, runner: ubuntu-24.04 }
+          - { backend: squashfuse, arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: cvenv-x86_64-unknown-linux-gnu
+          name: cvenv-${{ matrix.arch }}-unknown-linux-gnu
           path: dist
       - name: Install the binary under test
         run: |
-          (cd dist && sha256sum -c cvenv-x86_64-unknown-linux-gnu.sha256)
-          install -D -m 755 dist/cvenv-x86_64-unknown-linux-gnu "$RUNNER_TEMP/bin/cvenv"
+          (cd dist && sha256sum -c cvenv-${{ matrix.arch }}-unknown-linux-gnu.sha256)
+          install -D -m 755 dist/cvenv-${{ matrix.arch }}-unknown-linux-gnu "$RUNNER_TEMP/bin/cvenv"
       - uses: prefix-dev/setup-pixi@v0.11.3   # pixi only: the test needs no build env
         with:
           pixi-version: v0.84.2
