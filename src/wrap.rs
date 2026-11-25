@@ -13,8 +13,8 @@ use crate::runtime::{
     HOST_ENV_DROP, INSTALL_SQFS,
 };
 use crate::util::{
-    expand, human_size, info, is_executable, is_under, lock_file, now_iso, realpath, remove_tree,
-    warn, which, write_atomic, write_json,
+    expand, human_size, info, is_executable, is_under, lock_file, now_iso, q, realpath,
+    remove_tree, warn, which, write_atomic, write_json,
 };
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -679,6 +679,50 @@ fn replace_with_stub(env: &Env, tree: &Path, bin_dirs: &[String]) -> Result<()> 
         b = crate::util::q(&backup.display().to_string())
     );
     Ok(())
+}
+
+/// After `unregister --delete` of a wrap-install env: release its mount on the original
+/// path (unless something still uses it) and say what is left there.
+pub fn after_delete(install_path: &Path, backend: Backend) {
+    if backend == Backend::Squashfuse
+        && matches!(
+            crate::squash::state(install_path),
+            crate::squash::MountState::Mounted | crate::squash::MountState::Stale
+        )
+        // not lazy: a mount still in use (e.g. by a running job) stays until it is idle
+        && !crate::squash::unmount(install_path, false)
+    {
+        info(&format!(
+            "{} stays mounted while it is in use; it unmounts by itself when idle",
+            install_path.display()
+        ));
+        return;
+    }
+    if !install_path.join(STUB_MARKER).exists() {
+        return; // not replaced (or already gone): nothing left behind
+    }
+    let mut backups: Vec<PathBuf> = glob::glob(&format!(
+        "{}.cvenv-orig-*",
+        glob::Pattern::escape(&install_path.display().to_string())
+    ))
+    .map(|g| g.filter_map(|p| p.ok()).filter(|p| p.is_dir()).collect())
+    .unwrap_or_default();
+    backups.sort();
+    let ip = q(&install_path.display().to_string());
+    match backups.last() {
+        Some(b) => warn(&format!(
+            "{} is a stub of the deleted env and no longer works; restore the original with:\n    rm -rf {} && mv {} {}",
+            install_path.display(),
+            ip,
+            q(&b.display().to_string()),
+            ip
+        )),
+        None => warn(&format!(
+            "{} is a stub of the deleted env and no longer works (its original files were already deleted); remove it with `rm -rf {}`",
+            install_path.display(),
+            ip
+        )),
+    }
 }
 
 /// Re-point a stub's bin dirs after the env directory moved.

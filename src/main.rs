@@ -1097,6 +1097,7 @@ fn move_dir(src: &Path, dst: &Path) -> Result<()> {
 fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
     let e = resolve_env(Some(name), false, false)?;
     let install_path = e.meta().and_then(|m| m.install_path);
+    let backend = e.backend();
     if delete {
         let targets: Vec<PathBuf> = if e.manifest_inside() {
             vec![e.path.clone()]
@@ -1141,11 +1142,7 @@ fn cmd_unregister(name: &str, delete: bool, yes: bool) -> Result<()> {
     info(&format!("unregistered '{}'", name));
     if delete && e.kind == Kind::WrapInstall {
         if let Some(ip) = &install_path {
-            warn(&format!(
-                "if {} was replaced by a stub, it no longer works: restore it from {}.cvenv-orig-*",
-                ip.display(),
-                ip.display()
-            ));
+            wrap::after_delete(ip, backend);
         }
     }
     if e.is_active() {
