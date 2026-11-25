@@ -15,3 +15,4 @@ build = "bash scripts/build.sh"
 test = "bash scripts/build.sh --test"
 lint = "bash scripts/build.sh --lint"   # rustfmt --check + clippy -D warnings
 fmt = "bash scripts/build.sh --fmt"
+e2e = "bash scripts/e2e.sh"   # end-to-end test of bin/cvenv (or a given binary); needs network
