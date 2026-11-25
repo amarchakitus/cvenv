@@ -23,6 +23,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Building from source requires Rust 1.88 or newer. The previously declared 1.87 never worked
   with the current dependencies; CI now checks the minimum version.
 
+### Fixed
+
+- `cvenv init` creates manifests for the machine it runs on. It always wrote `linux-64`, so on
+  aarch64 clusters (e.g. Grace Hopper) new envs couldn't be installed. `--platform` still
+  overrides.
+- Apptainer builds no longer print "destination is already in the mount point list" for each
+  bind.
+- Apptainer no longer warns "Data image ... is not writable" on every command of a
+  `wrap-install` env.
+- `cvenv unregister --delete` of a `wrap-install` env releases its squashfuse mount on the
+  original path right away (unless it is in use), and only warns about a stub left there, with
+  the exact command to restore the original or a note that it was already deleted.
+
 ## [0.5.0] - 2026-11-25
 
 ### Added
