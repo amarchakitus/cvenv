@@ -23,7 +23,8 @@
 #   --version vX.Y.Z      release to install (default: latest)
 #   --repo OWNER/NAME     GitHub repo with the releases (default: amarchakitus/cvenv)
 #   --url URL, --binary FILE, --from-source, --keep-binary
-#                         where the cvenv binary comes from (default: download the release)
+#                         where the cvenv binary comes from (default: download the release);
+#                         downloads (also --url) are verified against URL.sha256
 #   --backend B           image backend: auto (default), apptainer or squashfuse
 #   --pixi PATH, --apptainer PATH, --squashfuse PATH
 #                         use these tools instead of the detected ones
@@ -383,13 +384,15 @@ case "$SOURCE" in
             fi
         fi
         if [ -n "$TRIPLE$F_URL" ] && fetch "$URL" "$CVENV.new" 2>/dev/null; then
-            if fetch "$URL.sha256" "$CVENV.sha256" 2>/dev/null; then
-                want="$(awk '{print $1}' "$CVENV.sha256")"; got="$(sha256sum "$CVENV.new" | awk '{print $1}')"
-                rm -f "$CVENV.sha256"
-                [ "$want" = "$got" ] || { rm -f "$CVENV.new"; fail "checksum mismatch for $URL"; }
-            else
-                warn "no checksum published next to the binary; skipped verification"
+            # like `cvenv self-update`: never install a download without a matching checksum
+            # (to install an unverified file anyway, download it yourself and use --binary FILE)
+            if ! fetch "$URL.sha256" "$CVENV.sha256" 2>/dev/null; then
+                rm -f "$CVENV.new" "$CVENV.sha256"
+                fail "no checksum at $URL.sha256; refusing to install an unverified binary (to install it anyway, download it yourself and use --binary FILE)"
             fi
+            want="$(awk '{print tolower($1); exit}' "$CVENV.sha256")"; got="$(sha256sum "$CVENV.new" | awk '{print $1}')"
+            rm -f "$CVENV.sha256"
+            [ "$want" = "$got" ] || { rm -f "$CVENV.new"; fail "checksum mismatch for $URL (expected ${want:-nothing}, got $got)"; }
             install_bin "$CVENV.new"
         elif [ "$SOURCE" = download ] && [ -z "$F_SOURCE$F_VERSION$F_REPO" ] && [ "$IN_CHECKOUT" = 1 ]; then
             rm -f "$CVENV.new"
