@@ -40,6 +40,29 @@ jobs:
       - name: shellcheck   # pinned: the runner's preinstalled version differs
         run: pixi exec --spec shellcheck==0.11.0 shellcheck installation.sh scripts/*.sh
 
+  # The oldest Rust that builds the locked dependencies: Cargo.toml's rust-version.
+  # A dependency bump that needs a newer Rust fails here (raise rust-version, and
+  # the lower bound in pixi.toml, deliberately).
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          v="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)"
+          [ -n "$v" ] || { echo "::error::no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --locked --all-targets
+      - run: cargo test --locked
+
   binaries:
     name: binary (${{ matrix.triple }})
     strategy:
@@ -99,7 +122,7 @@ jobs:
   # The `build` check is required on main (repository ruleset); it passes only if
   # every job above passed, so new jobs don't need a ruleset change.
   build:
-    needs: [lint, binaries]
+    needs: [lint, msrv, binaries]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
