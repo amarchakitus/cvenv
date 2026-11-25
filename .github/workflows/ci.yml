@@ -119,10 +119,57 @@ jobs:
           path: dist/*
           retention-days: 7
 
+  # The real workflows (scripts/e2e.sh) with the x86_64 binary built above, once per backend.
+  e2e:
+    name: e2e (${{ matrix.backend }})
+    needs: binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [squashfuse, apptainer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: cvenv-x86_64-unknown-linux-gnu
+          path: dist
+      - name: Install the binary under test
+        run: |
+          (cd dist && sha256sum -c cvenv-x86_64-unknown-linux-gnu.sha256)
+          install -D -m 755 dist/cvenv-x86_64-unknown-linux-gnu "$RUNNER_TEMP/bin/cvenv"
+      - uses: prefix-dev/setup-pixi@v0.11.3   # pixi only: the test needs no build env
+        with:
+          pixi-version: v0.84.2
+          run-install: false
+      - name: Install squashfuse
+        if: matrix.backend == 'squashfuse'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q squashfuse fuse3 squashfs-tools
+      - name: Install Apptainer
+        if: matrix.backend == 'apptainer'
+        env:
+          APPTAINER_VERSION: 1.5.5   # the .deb from the GitHub release (the PPA is often unavailable)
+        run: |
+          deb="apptainer_${APPTAINER_VERSION}_amd64.deb"
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/$deb" \
+            "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/$deb"
+          sudo apt-get update -q
+          sudo apt-get install -y -q "$RUNNER_TEMP/$deb"
+          # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          apptainer --version
+      - name: scripts/e2e.sh
+        run: bash scripts/e2e.sh "$RUNNER_TEMP/bin/cvenv"
+        env:
+          CVENV_E2E_BACKEND: ${{ matrix.backend }}
+
   # The `build` check is required on main (repository ruleset); it passes only if
   # every job above passed, so new jobs don't need a ruleset change.
   build:
-    needs: [lint, msrv, binaries]
+    needs: [lint, msrv, binaries, e2e]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
