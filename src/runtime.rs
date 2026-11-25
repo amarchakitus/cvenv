@@ -354,7 +354,9 @@ pub fn container_command(env: &Env, args: &[String], mode: &str) -> Result<Conta
     if env.kind == Kind::WrapInstall {
         if let Some(ip) = &meta.install_path {
             binds.push(format!(
-                "{}:{}:image-src=/",
+                // `ro`: the image is read-only anyway; without it Apptainer tries to open
+                // it writable and warns on every command
+                "{}:{}:ro,image-src=/",
                 env.art().join(INSTALL_SQFS).display(),
                 ip.display()
             ));
