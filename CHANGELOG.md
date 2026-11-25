@@ -7,6 +7,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Release binaries carry signed build provenance. Verify a downloaded binary with
+  `gh attestation verify cvenv-x86_64-unknown-linux-gnu --repo amarchakitus/cvenv`.
+- End-to-end tests (`pixi run e2e`) of the main workflows: init, add, rebuild, run, staleness,
+  reproducing an env from a clone, `--import` and `wrap-install --replace`. CI runs them on
+  every change with the release binary, on both the squashfuse and Apptainer backends.
+
+### Changed
+
+- The installer refuses to install a downloaded binary (release, `--version` or `--url`) without
+  a matching `.sha256`, as `cvenv self-update` already did. To install an unverified file
+  deliberately, download it yourself and use `--binary FILE`.
+- Building from source requires Rust 1.88 or newer. The previously declared 1.87 never worked
+  with the current dependencies; CI now checks the minimum version.
+
 ## [0.5.0] - 2026-11-25
 
 ### Added
