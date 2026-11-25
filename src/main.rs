@@ -130,7 +130,7 @@ enum Cmd {
         /// Channel for a new manifest (repeatable; default conda-forge)
         #[arg(short, long)]
         channel: Vec<String>,
-        /// Platform for a new manifest (repeatable; default linux-64)
+        /// Platform for a new manifest (repeatable; default: this machine's, e.g. linux-64)
         #[arg(short, long)]
         platform: Vec<String>,
         /// Add `[system-requirements] cuda = VER` (needed to resolve GPU builds)
@@ -630,7 +630,7 @@ fn cmd_init(
             channels
         };
         let platforms = if platforms.is_empty() {
-            vec!["linux-64".to_string()]
+            vec![host_platform().to_string()]
         } else {
             platforms
         };
@@ -1434,6 +1434,15 @@ fn cmd_shell(argv: &[String]) -> Result<()> {
     exec_in_container(&e, &rest, "shell")
 }
 
+/// The conda platform of this machine (new manifests default to it; an aarch64 cluster
+/// can't install a manifest that only lists linux-64).
+fn host_platform() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "linux-aarch64",
+        _ => "linux-64",
+    }
+}
+
 /// `cvenv init` argument that is a directory rather than an env name.
 fn looks_like_path(s: &str) -> bool {
     s == "." || s == ".." || s.starts_with('~') || s.contains('/')
@@ -1802,6 +1811,15 @@ mod tests {
         assert_eq!(n("/x/.hidden").as_deref(), Some("hidden"));
         assert_eq!(n("/x/___"), None);
         assert_eq!(n("/"), None);
+    }
+
+    #[test]
+    fn host_platform_matches_arch() {
+        let want = match std::env::consts::ARCH {
+            "aarch64" => "linux-aarch64",
+            _ => "linux-64",
+        };
+        assert_eq!(host_platform(), want);
     }
 
     #[test]
