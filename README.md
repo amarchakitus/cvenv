@@ -157,6 +157,8 @@ pixi run test
 Pushing a `v*` tag publishes static x86_64 and aarch64 binaries through
 `.github/workflows/ci.yml`; the tag must match the version in `Cargo.toml`.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributing and [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
