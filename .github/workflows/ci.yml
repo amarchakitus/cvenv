@@ -1,6 +1,6 @@
 # Test and build static Linux binaries (x86_64 + aarch64) on every push and PR.
-# Pushing a tag like v0.5.0 also attaches the binaries to a GitHub release;
-# running it manually just produces the artifacts.
+# Pushing a tag like v0.5.0 also attaches the binaries to a GitHub release, with
+# build provenance attestations; running it manually just produces the artifacts.
 name: ci
 on:
   push:
@@ -114,12 +114,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write       # create the release
+      id-token: write       # Sigstore certificate for the attestation
+      attestations: write   # store the attestation
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      # signed SLSA build provenance for the binaries (not the .sha256 files);
+      # verify with `gh attestation verify cvenv-<triple> --repo <owner>/cvenv`
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/cvenv-*-unknown-linux-gnu
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
