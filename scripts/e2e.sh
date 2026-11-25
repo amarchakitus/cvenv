@@ -38,14 +38,21 @@ fail() {
 trap 'rc=$?; [ -e "${T:-/nonexistent}/.failed" ] && exit 1; fail "command failed (exit $rc): $BASH_COMMAND"' ERR
 
 # Run cvenv, echoing the command (output goes to the caller); fail on a non-zero exit.
+# stderr is also appended to $T/stderr.log, checked for known-bad warnings at the end.
 cv() {
     printf '+ cvenv %s\n' "$*" >&2
-    "$BIN" "$@" || fail "\`cvenv $*\` exited with $?"
+    "$BIN" "$@" 2> >(tee -a "$T/stderr.log" >&2) || fail "\`cvenv $*\` exited with $?"
 }
-# Run cvenv and capture stdout into $OUT (stderr still shown); fail on a non-zero exit.
+# Run cvenv and capture stdout into $OUT (stderr still shown and logged); fail on a non-zero exit.
 cv_out() {
     printf '+ cvenv %s\n' "$*" >&2
-    OUT="$("$BIN" "$@")" || fail "\`cvenv $*\` exited with $?"
+    OUT="$("$BIN" "$@" 2> >(tee -a "$T/stderr.log" >&2))" || fail "\`cvenv $*\` exited with $?"
+}
+# Run cvenv and capture stdout and stderr together into $OUT; fail on a non-zero exit.
+cv_all() {
+    printf '+ cvenv %s\n' "$*" >&2
+    OUT="$("$BIN" "$@" 2>&1)" || fail "\`cvenv $*\` exited with $?"
+    printf '%s\n' "$OUT" | tee -a "$T/stderr.log" >&2
 }
 
 assert_file() { [ -f "$1" ] || fail "expected file $1"; }
@@ -173,6 +180,12 @@ mkdir -p "$PROJ"
 cd "$PROJ"
 cv init . python=3.12
 assert_file "$PROJ/pixi.toml"
+# new manifests target this machine (an aarch64 cluster can't install a linux-64-only manifest)
+case "$(uname -m)" in
+    aarch64) HOST_PLATFORM=linux-aarch64 ;;
+    *) HOST_PLATFORM=linux-64 ;;
+esac
+assert_contains "$(grep '^platforms' "$PROJ/pixi.toml")" "$HOST_PLATFORM" "platforms in a new pixi.toml"
 assert_dir "$PROJ/.git"
 assert_registered analysis
 assert_status analysis "not"   # "not built"
@@ -400,9 +413,23 @@ assert_unregistered analysis
 assert_missing "$STORE_ENV"
 assert_file "$PROJ/pixi.toml"   # a project env's manifest is the user's: kept
 assert_file "$PROJ/pixi.lock"
-cv unregister oldenv --delete --yes
+# the original path is a stub whose backup is gone: say so (not "restore from the backup"),
+# and release the image mounted over it instead of leaving it until the mount timeout
+cv_all unregister oldenv --delete --yes
 assert_unregistered oldenv
 assert_missing "$STORE/oldenv"
+assert_contains "$OUT" "original files were already deleted" "unregister of a replaced env without backup"
+if [ "$BACKEND" = squashfuse ] && awk -v m="$OLD" '$5 == m {f=1} END {exit !f}' /proc/self/mountinfo; then
+    fail "$OLD is still mounted after its env was deleted"
+fi
+
+step "no known-bad warnings"
+wait   # let the stderr tees finish
+for bad in "destination is already in the mount point list" "is not writable, proceeding with read-only"; do
+    if grep -qF "$bad" "$T/stderr.log"; then
+        fail "cvenv printed a known-bad warning: $(grep -F "$bad" "$T/stderr.log" | head -1)"
+    fi
+done
 
 trap - ERR
 printf '\n\033[1;32me2e: all checks passed (%s backend, %ss)\033[0m\n' "$BACKEND" "$((SECONDS - START))" >&2
