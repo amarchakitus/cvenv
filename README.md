@@ -32,7 +32,7 @@ squashfuse; your settings are kept either way. See `./installation.sh --help` fo
 ## Quick start
 
 New to cvenv? The [getting started tutorial](docs/getting-started.md) walks through it for
-conda users.
+new users.
 
 ```bash
 cvenv init myenv python=3.12 numpy        # creates <store>/myenv/pixi.toml

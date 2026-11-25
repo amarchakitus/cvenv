@@ -1,7 +1,8 @@
 # Getting started
 
 This tutorial takes about ten minutes and assumes you have used conda environments before.
-It covers creating an environment, using it, and bringing existing conda environments over.
+It covers creating an environment, using it, bringing existing conda environments over, and
+setting up the same env on another cluster.
 
 ## Why cvenv
 
@@ -177,6 +178,44 @@ change.
 | `conda list [PATTERN]` | `cvenv list [PATTERN]` |
 | `conda run -n NAME CMD` | `cvenv run --env NAME CMD` |
 | `conda env remove -n NAME` | `cvenv unregister NAME --delete` |
+
+
+# Moving to another cluster
+
+Move the manifest, not the image. The files `pixi.toml` and `pixi.lock` describe the env exactly, so a
+rebuild on the new cluster installs the same package versions. Images are cheap to rebuild and
+specific to a cluster's setup.
+
+**On the new cluster, once:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/amarchakitus/cvenv/main/installation.sh | bash
+```
+
+The installer detects Apptainer or squashfuse and asks for the settings below. 
+
+**For each project:**
+
+```bash
+git clone git@github.com:me/analysis.git && cd analysis
+cvenv init .                 # registers the existing pixi.toml; nothing is re-solved
+cvenv rebuild                # or: cvenv rebuild --slurm --wait
+```
+
+**Check on each new cluster:**
+
+| Setting | Why it matters | How |
+|---|---|---|
+| Store location | Images take 100s of MB to GBs; use a filesystem with space that isn't purged. However, a purged image only requires a rebuild, so nothing is lost if an image happens to be purged. | `cvenv config set store /project/me/envs` |
+| Slurm account and partition | Differ between clusters | `cvenv config set slurm-args "-A acct -p part"` |
+| Build location | Build large envs on compute nodes rather than the login node | `cvenv config set rebuild-mode slurm` |
+| Build scratch | Builds need fast node-local disk; change it if `/tmp` is small or mounted `noexec` | `cvenv config set build-tmpdir /local/scratch` |
+| CPU architecture | ARM clusters (e.g. Grace Hopper) need `linux-aarch64` in the manifest; add it once and commit the updated lock | `pixi workspace platform add linux-aarch64` |
+| GPU | `[system-requirements] cuda` travels with the manifest; the new cluster's driver must support that CUDA version | `nvidia-smi` on a GPU node |
+| Data paths (Apptainer) | Only `$HOME`, `/tmp`, the current directory and the site's default bind paths are visible in the container | `binds = ["/data"]` under `[tool.cvenv]`, or `CVENV_BINDS` |
+
+`cvenv config` shows every setting and where its value comes from; see
+[configuration](configuration.md) for the full list.
 
 ## Next steps
 
